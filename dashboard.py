@@ -185,6 +185,12 @@ STYLE = """
   }
   .review-btn:hover { background: #333; text-decoration: none; }
   .view-link { font-size: 12px; color: #888; }
+  .quick-action { margin: 0; padding: 0 12px 12px; }
+  .unready-btn {
+    width: 100%; background: #fff; border: 1px solid #eee; color: #92400e; padding: 6px 10px;
+    border-radius: 7px; font-size: 11.5px; font-weight: 600; cursor: pointer;
+  }
+  .unready-btn:hover { border-color: #b45309; background: #fef3c7; }
 
   /* Edit / review page */
   .edit-page { max-width: 760px; }
@@ -442,7 +448,13 @@ PRODUCT_CARD_TEMPLATE = """<div class="product-card">
     <a class="review-btn" href="/product/{product_id}?back={back}">Review &amp; Edit</a>
     <a class="view-link" href="{post_url}" target="_blank">View post</a>
   </div>
+  {quick_action}
 </div>"""
+
+QUICK_UNREADY_TEMPLATE = """<form class="quick-action" method="post" action="/product/{product_id}/unready">
+  <input type="hidden" name="back" value="{back}">
+  <button type="submit" class="unready-btn" onclick="return confirm('Send this back to Needs review?')">Remove from ready</button>
+</form>"""
 
 EDIT_PAGE_TEMPLATE = """<!doctype html>
 <html>
@@ -621,7 +633,11 @@ FILTER_CLAUSES = {
     "available": "AND pr.availability_status = 'AVAILABLE'",
     "sold_out": "AND pr.availability_status = 'SOLD_OUT'",
     "unknown": "AND (pr.availability_status IS NULL OR pr.availability_status = 'UNKNOWN')",
-    "review": "AND pr.review_required = 1",
+    # Sold-out items are never review work -- once a product is sold out
+    # nobody (system or human) needs to touch it again, it just belongs on
+    # the Sold out tab. Excluded here regardless of how review_required
+    # happened to be left set, so stale flags can't leak into this count.
+    "review": "AND pr.review_required = 1 AND (pr.availability_status IS NULL OR pr.availability_status != 'SOLD_OUT')",
 }
 ID_FILTER_KEYS = ("fully_ready", "ready_to_ship")
 
@@ -663,7 +679,8 @@ def render_brand_page(profile: str):
     ).fetchone()[0]
     review_required = conn.execute(
         """SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND pr.review_required = 1""", (profile,)
+           WHERE p.profile = ? AND pr.review_required = 1
+             AND (pr.availability_status IS NULL OR pr.availability_status != 'SOLD_OUT')""", (profile,)
     ).fetchone()[0]
     duplicates = conn.execute(
         """SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
@@ -719,7 +736,8 @@ def render_brand_page(profile: str):
     else:
         products = []
 
-    back_url = quote(f"/brand/{profile}?page={page}&size={page_size}&status={status_filter}", safe="")
+    back_plain = f"/brand/{profile}?page={page}&size={page_size}&status={status_filter}"
+    back_url = quote(back_plain, safe="")
 
     cards_html = []
     for r in products:
@@ -732,7 +750,10 @@ def render_brand_page(profile: str):
         )
         availability = r["availability_status"] or "UNKNOWN"
         cards_html.append(PRODUCT_CARD_TEMPLATE.format(
-            review_flag='<div class="needs-review-flag">Needs review</div>' if r["review_required"] else "",
+            review_flag=(
+                '<div class="needs-review-flag">Needs review</div>'
+                if r["review_required"] and availability != "SOLD_OUT" else ""
+            ),
             img=img_tag,
             product_name=r["product_name"] or "(no name yet)",
             availability=availability,
@@ -741,6 +762,10 @@ def render_brand_page(profile: str):
             post_url=r["post_url"],
             product_id=r["id"],
             back=back_url,
+            quick_action=(
+                QUICK_UNREADY_TEMPLATE.format(product_id=r["id"], back=back_plain)
+                if status_filter in ("fully_ready", "ready_to_ship") else ""
+            ),
         ))
 
     tab_links = "\n".join(
@@ -1116,6 +1141,19 @@ def product_save(product_id):
     # old behavior) meant saving never confirmed whether it worked.
     back = request.form.get("back", "")
     return redirect(f"/product/{product_id}?saved=1&back={quote(back, safe='')}")
+
+
+@app.route("/product/<int:product_id>/unready", methods=["POST"])
+def product_unready(product_id):
+    # One-click demote straight from the Fully ready / Ready to ship grid --
+    # sends it back to Needs review without opening the full edit form, for
+    # when a reviewer spots a problem while just scanning photos.
+    conn = get_conn()
+    conn.execute("UPDATE product SET review_required = 1 WHERE id = ?", (product_id,))
+    conn.commit()
+    conn.close()
+    back = request.form.get("back", "")
+    return redirect(back or "/")
 
 
 @app.route("/product/<int:product_id>/media/<int:media_id>/exclude", methods=["POST"])
