@@ -350,13 +350,13 @@ PAGE_TEMPLATE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="8">
+{refresh_meta}
 <title>Catalog Progress</title>
 <style>{style}</style>
 </head>
 <body>
   <h1>{title}</h1>
-  <div class="subtitle">auto-refreshes every 8s &middot; {total_posts} posts collected</div>
+  <div class="subtitle">{refresh_note}{total_posts} posts collected</div>
   {tabs}
 
   <div class="tips-banner">
@@ -403,17 +403,30 @@ HOME_TEMPLATE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="15">
+{refresh_meta}
 <title>Catalog Progress</title>
 <style>{style}</style>
 </head>
 <body>
   <h1>Catalog progress</h1>
-  <div class="subtitle">auto-refreshes every 15s &middot; pick a brand below to start reviewing its products</div>
+  <div class="subtitle">{refresh_note}pick a brand below to start reviewing its products</div>
   {cards}
 </body>
 </html>
 """
+
+
+def _refresh_meta(seconds):
+    """Full-page auto-refresh is only useful for local dev, where Ted is
+    watching extraction happen in real time. On the deployed copy the
+    reviewer is actively clicking through products -- an involuntary
+    full-page reload every few seconds yanks her back to the top of the
+    page mid-scroll or mid-click. That copy's data only moves when Ted
+    re-syncs catalog.db to the volume anyway, not continuously, so there's
+    nothing to gain from refreshing it there."""
+    if os.environ.get("PORT"):
+        return "", ""
+    return f'<meta http-equiv="refresh" content="{seconds}">', f"auto-refreshes every {seconds}s &middot; "
 
 PRODUCT_CARD_TEMPLATE = """<div class="product-card">
   {review_flag}
@@ -770,8 +783,11 @@ def render_brand_page(profile: str):
     status_filters = f'<div class="status-filters">{status_filters_html}</div>'
 
     conn.close()
+    refresh_meta, refresh_note = _refresh_meta(8)
     return PAGE_TEMPLATE.format(
         style=STYLE,
+        refresh_meta=refresh_meta,
+        refresh_note=refresh_note,
         title=profile,
         tabs=tabs,
         total_posts=total_posts,
@@ -815,7 +831,13 @@ def home():
             f'</a>'
         )
     conn.close()
-    return HOME_TEMPLATE.format(style=STYLE, cards="\n".join(cards) or "<p>No posts collected yet.</p>")
+    refresh_meta, refresh_note = _refresh_meta(15)
+    return HOME_TEMPLATE.format(
+        style=STYLE,
+        refresh_meta=refresh_meta,
+        refresh_note=refresh_note,
+        cards="\n".join(cards) or "<p>No posts collected yet.</p>",
+    )
 
 
 @app.route("/brand/<profile>")
