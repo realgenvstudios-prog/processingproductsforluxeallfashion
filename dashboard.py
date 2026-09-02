@@ -950,10 +950,29 @@ def resolve_media_path(stored_path: str) -> Path:
 @app.route("/media/<int:media_id>")
 def media(media_id):
     conn = get_conn()
-    row = conn.execute("SELECT local_path FROM media WHERE id = ?", (media_id,)).fetchone()
-    conn.close()
+    row = conn.execute(
+        """SELECT m.local_path, m.position, m.post_id, p.profile
+           FROM media m JOIN instagram_post p ON p.id = m.post_id
+           WHERE m.id = ?""", (media_id,),
+    ).fetchone()
     if not row:
+        conn.close()
         abort(404)
+    product_ids = [
+        r[0] for r in conn.execute(
+            "SELECT id FROM product WHERE post_id = ?", (row["post_id"],)
+        ).fetchall()
+    ]
+    conn.close()
+
+    # Prefer the cleaned (background-removed) version when one has been
+    # generated for this post's product(s) -- same source image, same
+    # position number, just cleaner. Falls back to the raw original.
+    for pid in product_ids:
+        clean_path = CLEAN_IMAGES_ROOT / row["profile"] / f"product_{pid}" / f"{row['position']}.png"
+        if clean_path.exists():
+            return send_file(clean_path)
+
     path = resolve_media_path(row["local_path"])
     if not path.exists():
         abort(404)
