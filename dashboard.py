@@ -286,10 +286,57 @@ STYLE = """
   .saved-banner a { color: inherit; font-weight: 700; text-decoration: underline; }
 
   @media (max-width: 640px) {
-    body { padding: 20px 16px 100px; }
-    .product-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+    body { padding: 16px 14px 100px; }
+    h1 { font-size: 19px; }
+    .subtitle { font-size: 12px; margin-bottom: 16px; }
+
+    .tabs {
+      flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch;
+      padding-bottom: 6px; margin-bottom: 16px;
+    }
+    .tab { flex: 0 0 auto; }
+
+    .tips-banner { font-size: 12.5px; padding: 12px 14px; margin-bottom: 20px; }
+
+    .stats { grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 24px; }
+    .stat { padding: 12px 14px; }
+    .stat .value { font-size: 20px; }
+
+    .status-filters {
+      flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch;
+      padding-bottom: 6px; margin-bottom: 16px;
+    }
+    .status-filters a { flex: 0 0 auto; }
+
+    .page-size { font-size: 12px; flex-wrap: wrap; }
+
+    .product-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .pname { font-size: 12.5px; min-height: 2.4em; }
+    .pactions { flex-direction: column; align-items: stretch; gap: 6px; }
+    .review-btn, .view-link { text-align: center; padding: 9px 12px; }
+    .view-link { border: 1px solid #eee; border-radius: 7px; }
+
+    .pagination { flex-wrap: wrap; row-gap: 10px; }
+    .pagination a { padding: 9px 16px; }
+
+    /* Edit / review page */
     .section-card { padding: 16px; }
-    .edit-topbar { flex-direction: column; align-items: flex-start; }
+    .edit-topbar { flex-direction: column; align-items: stretch; gap: 12px; }
+    .nav-buttons { justify-content: space-between; }
+    .nav-btn { flex: 1; text-align: center; padding: 10px 12px; }
+
+    .edit-image-tile { width: 100px; }
+    .edit-images img { width: 100px; height: 100px; }
+
+    .upload-form { flex-direction: column; align-items: stretch; gap: 8px; }
+    .upload-btn { padding: 10px; }
+
+    /* 16px prevents iOS Safari from auto-zooming in when a field is tapped */
+    .field input[type=text], .field select { font-size: 16px; padding: 12px; }
+    .color-picker label, .status-toggle label { padding: 8px 13px; }
+
+    .save-row { flex-direction: column; align-items: stretch; }
+    .save-btn, .view-post-btn { width: 100%; text-align: center; padding: 14px; }
   }
 """
 
