@@ -313,10 +313,10 @@ PAGE_TEMPLATE = """<!doctype html>
   {tabs}
 
   <div class="tips-banner">
-    &#128161; Click <strong>Review &amp; Edit</strong> on any product below to check its details, fix anything
+    Click <strong>Review &amp; Edit</strong> on any product below to check its details, fix anything
     that's wrong, and press <strong>Save</strong>. Once you're inside a product you can use the
     <strong>Prev / Next</strong> buttons to move through the whole list without coming back here each time.
-    Cards marked <span class="needs-review-flag inline">&#9888; Needs review</span> need your attention first.
+    Cards marked <span class="needs-review-flag inline">Needs review</span> need your attention first.
   </div>
 
   <div class="stats">
@@ -380,7 +380,7 @@ PRODUCT_CARD_TEMPLATE = """<div class="product-card">
   </div>
   <div class="pactions">
     <a class="review-btn" href="/product/{product_id}?back={back}">Review &amp; Edit</a>
-    <a class="view-link" href="{post_url}" target="_blank">View post &#8599;</a>
+    <a class="view-link" href="{post_url}" target="_blank">View post</a>
   </div>
 </div>"""
 
@@ -672,12 +672,12 @@ def render_brand_page(profile: str):
         )
         availability = r["availability_status"] or "UNKNOWN"
         cards_html.append(PRODUCT_CARD_TEMPLATE.format(
-            review_flag='<div class="needs-review-flag">&#9888; Needs review</div>' if r["review_required"] else "",
+            review_flag='<div class="needs-review-flag">Needs review</div>' if r["review_required"] else "",
             img=img_tag,
             product_name=r["product_name"] or "(no name yet)",
             availability=availability,
             availability_label=STATUS_LABELS.get(availability, availability),
-            price=f'GHS {r["price"]}' if r["price"] else "—",
+            price=f'GHS {r["price"]}' if r["price"] else "No price yet",
             post_url=r["post_url"],
             product_id=r["id"],
             back=back_url,
@@ -713,7 +713,7 @@ def render_brand_page(profile: str):
         ("unknown", f"Unknown status ({unknown_count})"),
         ("review", f"Needs review ({review_required})"),
         ("fully_ready", f"Fully ready ({fully_ready})"),
-        ("ready_to_ship", f"\U0001F680 Ready to ship ({ready_to_ship_count})"),
+        ("ready_to_ship", f"Ready to ship ({ready_to_ship_count})"),
     ]
     status_filters_html = "\n".join(
         f'<a class="{"active" if key == status_filter else ""}" '
@@ -950,13 +950,13 @@ def product_edit(product_id):
         next_cta = f' <a href="{next_href}">Next product &rarr;</a>' if next_href else ""
         if is_ready:
             saved_banner = (
-                '<div class="saved-banner ready">&#9989; Saved &mdash; \U0001F680 this product is now '
+                '<div class="saved-banner ready">Saved. This product is now '
                 f'<strong>Fully Ready</strong>. <a href="{back_href}">&larr; Back to list</a>{next_cta}</div>'
             )
         else:
             missing_list = ", ".join(missing)
             saved_banner = (
-                f'<div class="saved-banner not-ready">Saved &mdash; still not Fully Ready. '
+                f'<div class="saved-banner not-ready">Saved, but still not Fully Ready. '
                 f'Missing: <strong>{missing_list}</strong>. <a href="{back_href}">&larr; Back to list</a>{next_cta}</div>'
             )
     else:
