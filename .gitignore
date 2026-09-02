@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+.claude/
+
+# All local data: the live database, raw/cleaned images, and -- critically --
+# the browser_profile* folders, which hold live authenticated Instagram
+# session cookies. None of this belongs in git. Code and data are deployed
+# separately (data lives on a Railway persistent volume).
+data/
