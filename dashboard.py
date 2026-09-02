@@ -13,7 +13,7 @@ import os
 import sqlite3
 import uuid
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, parse_qs
 
 from flask import Flask, Response, abort, redirect, request, send_file
 
@@ -40,6 +40,8 @@ app = Flask(__name__)
 
 @app.before_request
 def require_auth():
+    if not os.environ.get("PORT"):
+        return  # local dev (`python dashboard.py`) -- no password needed on localhost
     auth = request.authorization
     if not auth or not hmac.compare_digest(auth.password or "", DASHBOARD_PASSWORD):
         return Response(
@@ -57,7 +59,7 @@ STYLE = """
   * { box-sizing: border-box; }
   html, body { height: auto; min-height: 100%; overflow-y: auto; }
   body {
-    background: #ffffff;
+    background: #fafafa;
     color: #1a1a1a;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     margin: 0;
@@ -69,9 +71,9 @@ STYLE = """
     padding: 3px 10px; border-radius: 6px; color: #555; background: #f4f4f4;
   }
   .page-size a.active { background: #1a1a1a; color: #fff; }
-  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  h1 { font-size: 22px; font-weight: 700; margin: 0 0 4px; }
   .subtitle { color: #888; font-size: 13px; margin-bottom: 20px; }
-  .tabs { display: flex; gap: 8px; margin-bottom: 28px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
   .tab {
     padding: 6px 14px;
     border-radius: 20px;
@@ -79,16 +81,22 @@ STYLE = """
     font-weight: 600;
     text-decoration: none;
     color: #555;
-    background: #f4f4f4;
+    background: #fff;
+    border: 1px solid #eee;
   }
-  .tab.active { background: #1a1a1a; color: #fff; }
+  .tab.active { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
+  .tips-banner {
+    background: #eff6ff; border: 1px solid #dbeafe; color: #1e3a5f;
+    border-radius: 10px; padding: 14px 18px; font-size: 13px; line-height: 1.6;
+    margin-bottom: 28px;
+  }
   .stats {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     gap: 12px;
     margin-bottom: 36px;
   }
-  .stat { border: 1px solid #eee; border-radius: 10px; padding: 16px 18px; }
+  .stat { border: 1px solid #eee; border-radius: 10px; padding: 16px 18px; background: #fff; }
   .stat .value { font-size: 26px; font-weight: 700; }
   .stat .label { font-size: 12px; color: #888; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.02em; }
   .stat.warn .value { color: #b45309; }
@@ -118,49 +126,111 @@ STYLE = """
   a:hover { text-decoration: underline; }
   .brand-card {
     display: block; border: 1px solid #eee; border-radius: 12px; padding: 20px 22px;
-    margin-bottom: 12px; text-decoration: none; color: inherit;
+    margin-bottom: 12px; text-decoration: none; color: inherit; background: #fff;
+    transition: border-color 0.15s;
   }
-  .brand-card:hover { border-color: #ccc; }
-  .brand-card .name { font-size: 16px; font-weight: 700; }
+  .brand-card:hover { border-color: #999; text-decoration: none; }
+  .brand-card .name { font-size: 16px; font-weight: 700; display: flex; justify-content: space-between; align-items: center; }
   .brand-card .meta { color: #888; font-size: 13px; margin-top: 4px; }
   .pagination {
     display: flex; align-items: center; justify-content: center; gap: 16px;
     margin-top: 24px; font-size: 13px; color: #666;
   }
   .pagination a {
-    padding: 6px 14px; border: 1px solid #ddd; border-radius: 6px; color: #1a1a1a;
+    padding: 6px 14px; border: 1px solid #ddd; border-radius: 6px; color: #1a1a1a; background: #fff;
   }
   .pagination a.disabled { color: #ccc; border-color: #eee; pointer-events: none; }
   .pagination a:hover { border-color: #999; text-decoration: none; }
   .status-filters { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
   .status-filters a {
-    padding: 6px 14px; border-radius: 20px; font-size: 13px; font-weight: 600; color: #555; background: #f4f4f4;
+    padding: 6px 14px; border-radius: 20px; font-size: 13px; font-weight: 600; color: #555; background: #fff; border: 1px solid #eee;
   }
-  .status-filters a.active { background: #1a1a1a; color: #fff; }
+  .status-filters a.active { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
   .review-link { margin-left: 8px; color: #b45309; font-weight: 600; }
-  .edit-page { max-width: 720px; }
-  .back-link { display: inline-block; margin-bottom: 20px; color: #888; font-size: 13px; }
-  .edit-images { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
-  .edit-image-tile { position: relative; width: 110px; }
-  .edit-images img { width: 110px; height: 110px; object-fit: cover; border-radius: 8px; background: #f7f7f7; display: block; }
+
+  /* Product grid (brand page) */
+  .product-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 16px;
+    margin-bottom: 8px;
+  }
+  .product-card {
+    background: #fff; border: 1px solid #eee; border-radius: 12px; overflow: hidden;
+    display: flex; flex-direction: column; position: relative; transition: box-shadow 0.15s, border-color 0.15s;
+  }
+  .product-card:hover { border-color: #ccc; box-shadow: 0 2px 10px rgba(0,0,0,0.06); }
+  .needs-review-flag {
+    position: absolute; top: 8px; left: 8px; z-index: 1; background: #b45309; color: #fff;
+    font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 20px; letter-spacing: 0.02em;
+  }
+  .needs-review-flag.inline { position: static; display: inline-block; }
+  .thumb-wrap { display: block; aspect-ratio: 3 / 4; background: #f7f7f7; overflow: hidden; }
+  .thumb-wrap img.thumb, .thumb-wrap .thumb-empty {
+    width: 100%; height: 100%; object-fit: cover; display: block;
+  }
+  .thumb-empty {
+    display: flex; align-items: center; justify-content: center; color: #ccc; font-size: 12px; text-align: center;
+  }
+  .pinfo { padding: 10px 12px 4px; flex: 1; }
+  .pname {
+    font-size: 13px; font-weight: 600; line-height: 1.3; margin-bottom: 6px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    min-height: 2.6em;
+  }
+  .pmeta { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  .pmeta .price { font-size: 13px; font-weight: 700; color: #1a1a1a; }
+  .pactions { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px 12px; }
+  .review-btn {
+    background: #1a1a1a; color: #fff; font-size: 12px; font-weight: 600; padding: 7px 12px;
+    border-radius: 7px; text-decoration: none;
+  }
+  .review-btn:hover { background: #333; text-decoration: none; }
+  .view-link { font-size: 12px; color: #888; }
+
+  /* Edit / review page */
+  .edit-page { max-width: 760px; }
+  .back-link { display: inline-block; color: #888; font-size: 13px; }
+  .edit-topbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+  .edit-bottombar { margin-top: 28px; }
+  .nav-buttons { display: flex; align-items: center; gap: 10px; }
+  .nav-btn {
+    padding: 7px 14px; border: 1px solid #ddd; border-radius: 7px; font-size: 13px; font-weight: 600;
+    color: #1a1a1a; background: #fff;
+  }
+  .nav-btn:hover { border-color: #999; text-decoration: none; }
+  .nav-btn.disabled { color: #ccc; border-color: #eee; }
+  .nav-position { font-size: 12px; color: #888; }
+  .section-card {
+    background: #fff; border: 1px solid #eee; border-radius: 12px; padding: 20px 22px; margin-bottom: 18px;
+  }
+  .section-title {
+    font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: #999;
+    margin-bottom: 14px;
+  }
+  .edit-images { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+  .edit-image-tile { position: relative; width: 130px; }
+  .edit-images img {
+    width: 130px; height: 130px; object-fit: cover; border-radius: 9px; background: #f7f7f7; display: block;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  }
   .edit-image-tile form { position: absolute; top: 4px; right: 4px; margin: 0; }
   .edit-image-remove {
     width: 22px; height: 22px; border-radius: 50%; border: none; background: rgba(0,0,0,0.65); color: #fff;
     font-size: 13px; line-height: 1; cursor: pointer;
   }
   .edit-image-remove:hover { background: #dc2626; }
-  .upload-form { margin-bottom: 24px; }
+  .upload-form { margin: 0; display: flex; align-items: center; gap: 10px; }
   .upload-form input[type=file] { font-size: 12px; }
   .upload-btn {
-    background: #f4f4f4; border: 1px solid #ddd; padding: 6px 14px; border-radius: 6px;
+    background: #f4f4f4; border: 1px solid #ddd; padding: 7px 14px; border-radius: 7px;
     font-size: 12px; font-weight: 600; cursor: pointer; color: #333;
   }
   .upload-btn:hover { border-color: #999; }
   .caption-box {
     background: #fafafa; border: 1px solid #eee; border-radius: 8px; padding: 14px 16px;
-    font-size: 13px; color: #555; white-space: pre-wrap; margin-bottom: 24px; max-height: 160px; overflow-y: auto;
+    font-size: 13px; color: #555; white-space: pre-wrap; max-height: 160px; overflow-y: auto;
   }
   .field { margin-bottom: 18px; }
+  .field:last-child { margin-bottom: 0; }
   .field label { display: block; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; color: #888; margin-bottom: 6px; }
   .field input[type=text] {
     width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; box-sizing: border-box;
@@ -196,20 +266,31 @@ STYLE = """
   .status-toggle label.opt-SOLD_OUT:has(input:checked) { background: #fee2e2; border-color: #991b1b; color: #991b1b; }
   .status-toggle label.opt-UNKNOWN:has(input:checked) { background: #f3f4f6; border-color: #6b7280; color: #6b7280; }
   .status-toggle label.opt-NOT_A_PRODUCT:has(input:checked) { background: #ede9fe; border-color: #5b21b6; color: #5b21b6; }
-  .still-review { display: flex; align-items: center; gap: 8px; margin: 22px 0; font-size: 13px; color: #555; }
+  .still-review {
+    display: flex; align-items: center; gap: 8px; margin: 18px 0; font-size: 13px; color: #555;
+    background: #fff; border: 1px solid #eee; border-radius: 10px; padding: 14px 16px;
+  }
+  .save-row { display: flex; align-items: center; gap: 12px; margin-top: 22px; }
   .save-btn {
     background: #1a1a1a; color: #fff; border: none; padding: 12px 28px; border-radius: 8px;
     font-size: 14px; font-weight: 600; cursor: pointer;
   }
   .save-btn:hover { background: #333; }
   .view-post-btn {
-    display: inline-block; margin-left: 12px; padding: 12px 20px; border: 1px solid #ddd; border-radius: 8px;
-    font-size: 14px; color: #1a1a1a;
+    display: inline-block; padding: 12px 20px; border: 1px solid #ddd; border-radius: 8px;
+    font-size: 14px; color: #1a1a1a; background: #fff;
   }
-  .saved-banner { padding: 10px 16px; border-radius: 8px; font-size: 13px; margin-bottom: 20px; }
+  .saved-banner { padding: 12px 16px; border-radius: 8px; font-size: 13px; margin-bottom: 20px; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
   .saved-banner.ready { background: #dcfce7; color: #166534; }
   .saved-banner.not-ready { background: #fef3c7; color: #92400e; }
-  .saved-banner a { color: inherit; font-weight: 600; text-decoration: underline; }
+  .saved-banner a { color: inherit; font-weight: 700; text-decoration: underline; }
+
+  @media (max-width: 640px) {
+    body { padding: 20px 16px 100px; }
+    .product-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+    .section-card { padding: 16px; }
+    .edit-topbar { flex-direction: column; align-items: flex-start; }
+  }
 """
 
 TABS_TEMPLATE = """<div class="tabs">
@@ -221,6 +302,7 @@ PAGE_TEMPLATE = """<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="8">
 <title>Catalog Progress</title>
 <style>{style}</style>
@@ -229,6 +311,13 @@ PAGE_TEMPLATE = """<!doctype html>
   <h1>{title}</h1>
   <div class="subtitle">auto-refreshes every 8s &middot; {total_posts} posts collected</div>
   {tabs}
+
+  <div class="tips-banner">
+    &#128161; Click <strong>Review &amp; Edit</strong> on any product below to check its details, fix anything
+    that's wrong, and press <strong>Save</strong>. Once you're inside a product you can use the
+    <strong>Prev / Next</strong> buttons to move through the whole list without coming back here each time.
+    Cards marked <span class="needs-review-flag inline">&#9888; Needs review</span> need your attention first.
+  </div>
 
   <div class="stats">
     <div class="stat"><div class="value">{total_posts}</div><div class="label">Posts collected</div></div>
@@ -253,13 +342,8 @@ PAGE_TEMPLATE = """<!doctype html>
 
   <div class="page-size">Show: {page_size_links}</div>
 
-  <div class="table-wrap">
-  <table>
-    <tr>
-      <th>Image</th><th>Product</th><th>Brand</th><th>Price</th><th>Status</th><th>Review?</th><th>Source</th>
-    </tr>
-    {rows}
-  </table>
+  <div class="product-grid">
+    {product_cards}
   </div>
 
   {pagination}
@@ -271,87 +355,106 @@ HOME_TEMPLATE = """<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="15">
 <title>Catalog Progress</title>
 <style>{style}</style>
 </head>
 <body>
   <h1>Catalog progress</h1>
-  <div class="subtitle">auto-refreshes every 15s</div>
+  <div class="subtitle">auto-refreshes every 15s &middot; pick a brand below to start reviewing its products</div>
   {cards}
 </body>
 </html>
 """
 
-ROW_TEMPLATE = """<tr>
-  <td>{img}</td>
-  <td>{product_name}</td>
-  <td>{brand}</td>
-  <td>{price}</td>
-  <td><span class="badge {availability}">{availability}</span></td>
-  <td class="{review_class}">{review_text}</td>
-  <td>
-    <a href="{post_url}" target="_blank">view post &rarr;</a>
-    <a class="review-link" href="/product/{product_id}?back={back}">review/edit</a>
-  </td>
-</tr>"""
+PRODUCT_CARD_TEMPLATE = """<div class="product-card">
+  {review_flag}
+  <a class="thumb-wrap" href="/product/{product_id}?back={back}">{img}</a>
+  <div class="pinfo">
+    <div class="pname">{product_name}</div>
+    <div class="pmeta">
+      <span class="badge {availability}">{availability_label}</span>
+      <span class="price">{price}</span>
+    </div>
+  </div>
+  <div class="pactions">
+    <a class="review-btn" href="/product/{product_id}?back={back}">Review &amp; Edit</a>
+    <a class="view-link" href="{post_url}" target="_blank">View post &#8599;</a>
+  </div>
+</div>"""
 
 EDIT_PAGE_TEMPLATE = """<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Review product</title>
 <style>{style}</style>
 </head>
 <body>
   <div class="edit-page">
-    <a class="back-link" href="{back_href}">&larr; back to {profile}</a>
+    <div class="edit-topbar">
+      <a class="back-link" href="{back_href}">&larr; back to {profile}</a>
+      {nav_buttons}
+    </div>
     <h1>{title}</h1>
     <div class="subtitle">Instagram post from {profile} &middot; {post_date}</div>
 
     {saved_banner}
 
-    <div class="edit-images">{images_html}</div>
+    <div class="section-card">
+      <div class="section-title">Photos</div>
+      <div class="edit-images">{images_html}</div>
+      <form class="upload-form" method="post" action="/product/{product_id}/media/upload" enctype="multipart/form-data">
+        <input type="hidden" name="back" value="{back_href}">
+        <input type="file" name="image" accept="image/*" required>
+        <button type="submit" class="upload-btn">+ Add photo</button>
+      </form>
+    </div>
 
-    <form class="upload-form" method="post" action="/product/{product_id}/media/upload" enctype="multipart/form-data">
-      <input type="hidden" name="back" value="{back_href}">
-      <input type="file" name="image" accept="image/*" required>
-      <button type="submit" class="upload-btn">Add photo</button>
-    </form>
-
-    <div class="caption-box">{caption}</div>
+    <div class="section-card">
+      <div class="section-title">Original Instagram caption</div>
+      <div class="caption-box">{caption}</div>
+    </div>
 
     <form method="post" action="/product/{product_id}/save">
       <input type="hidden" name="back" value="{back_href}">
 
-      <div class="field">
-        <label>Product name</label>
-        <input type="text" name="product_name" value="{product_name}">
-      </div>
-      <div class="field">
-        <label>Category</label>
-        <select name="category">
-          {category_options}
-        </select>
-      </div>
-      <div class="field">
-        <label>Price (number only, GHS)</label>
-        <input type="text" name="price" value="{price}">
-      </div>
-      <div class="field">
-        <label>Sizes (comma-separated)</label>
-        <input type="text" name="sizes" value="{sizes}">
-      </div>
-      <div class="field">
-        <label>Colors</label>
-        <div class="color-picker">
-          {color_options}
+      <div class="section-card">
+        <div class="section-title">Product details</div>
+        <div class="field">
+          <label>Product name</label>
+          <input type="text" name="product_name" value="{product_name}" placeholder="e.g. Zara Floral Midi Dress">
         </div>
-        <input type="text" class="custom-color-input" name="colors_custom" placeholder="Add other color(s), comma-separated" value="{colors_custom}">
+        <div class="field">
+          <label>Category</label>
+          <select name="category">
+            {category_options}
+          </select>
+        </div>
+        <div class="field">
+          <label>Price</label>
+          <input type="text" name="price" value="{price}" placeholder="e.g. 150">
+          <div class="hint">GHS. Numbers only -- no currency symbol or commas.</div>
+        </div>
+        <div class="field">
+          <label>Sizes</label>
+          <input type="text" name="sizes" value="{sizes}" placeholder="e.g. S, M, L or 38, 39, 40">
+          <div class="hint">Comma-separated.</div>
+        </div>
+        <div class="field">
+          <label>Colors</label>
+          <div class="color-picker">
+            {color_options}
+          </div>
+          <input type="text" class="custom-color-input" name="colors_custom" placeholder="Add other color(s), comma-separated" value="{colors_custom}">
+          <div class="hint">Click a color to select it, or type new ones on the line below.</div>
+        </div>
       </div>
 
-      <div class="field">
-        <label>Availability</label>
+      <div class="section-card">
+        <div class="section-title">Availability</div>
         <div class="status-toggle">
           {status_options}
         </div>
@@ -359,12 +462,16 @@ EDIT_PAGE_TEMPLATE = """<!doctype html>
 
       <label class="still-review">
         <input type="checkbox" name="still_needs_review" {still_review_checked}>
-        Still needs review after this edit
+        This product still needs another look after this edit (leave unchecked once it's good to go)
       </label>
 
-      <button type="submit" class="save-btn">Save</button>
-      <a class="view-post-btn" href="{post_url}" target="_blank">View original post &rarr;</a>
+      <div class="save-row">
+        <button type="submit" class="save-btn">Save</button>
+        <a class="view-post-btn" href="{post_url}" target="_blank">View original post &rarr;</a>
+      </div>
     </form>
+
+    <div class="edit-bottombar">{nav_buttons}</div>
   </div>
 </body>
 </html>
@@ -449,6 +556,33 @@ def ready_to_ship_ids(conn, profile):
     return [pid for pid in fully_ready_ids(conn, profile) if has_cleaned_image(profile, pid)]
 
 
+FILTER_CLAUSES = {
+    "all": "",
+    "available": "AND pr.availability_status = 'AVAILABLE'",
+    "sold_out": "AND pr.availability_status = 'SOLD_OUT'",
+    "unknown": "AND (pr.availability_status IS NULL OR pr.availability_status = 'UNKNOWN')",
+    "review": "AND pr.review_required = 1",
+}
+ID_FILTER_KEYS = ("fully_ready", "ready_to_ship")
+
+
+def filtered_product_ids(conn, profile, status_filter):
+    """Full list of product ids (newest first) matching one status filter --
+    shared by the brand page (for counting/paging) and the edit page's
+    Prev/Next nav, so both always agree on exactly the same ordered list."""
+    if status_filter == "fully_ready":
+        return sorted(fully_ready_ids(conn, profile), reverse=True)
+    if status_filter == "ready_to_ship":
+        return sorted(ready_to_ship_ids(conn, profile), reverse=True)
+    clause = FILTER_CLAUSES.get(status_filter, "")
+    rows = conn.execute(
+        f"""SELECT pr.id FROM product pr JOIN instagram_post p ON p.id = pr.post_id
+           WHERE p.profile = ? {clause} ORDER BY pr.id DESC""",
+        (profile,),
+    ).fetchall()
+    return [row["id"] for row in rows]
+
+
 def render_brand_page(profile: str):
     conn = get_conn()
     profiles = get_profiles(conn)
@@ -497,35 +631,12 @@ def render_brand_page(profile: str):
     ready_to_ship_count = image_cleaned_count  # same set: fully-ready AND image-cleaned
 
     status_filter = request.args.get("status", "all")
-    id_filter_sets = {
-        "fully_ready": lambda: fully_ready_ids(conn, profile),
-        "ready_to_ship": lambda: ready_to_ship_ids(conn, profile),
-    }
-    filter_clauses = {
-        "all": "",
-        "available": "AND pr.availability_status = 'AVAILABLE'",
-        "sold_out": "AND pr.availability_status = 'SOLD_OUT'",
-        "unknown": "AND (pr.availability_status IS NULL OR pr.availability_status = 'UNKNOWN')",
-        "review": "AND pr.review_required = 1",
-    }
-    if status_filter not in filter_clauses and status_filter not in id_filter_sets:
+    valid_statuses = set(FILTER_CLAUSES) | set(ID_FILTER_KEYS)
+    if status_filter not in valid_statuses:
         status_filter = "all"
 
-    query_params = [profile]
-    if status_filter in id_filter_sets:
-        ids = id_filter_sets[status_filter]()
-        visible_count = len(ids)
-        list_filter = f"AND pr.id IN ({','.join('?' for _ in ids)})" if ids else "AND 0"
-        query_params.extend(ids)
-    else:
-        list_filter = filter_clauses[status_filter]
-        visible_count = {
-            "all": total_products,
-            "available": available_count,
-            "sold_out": sold_out_count,
-            "unknown": unknown_count,
-            "review": review_required,
-        }[status_filter]
+    all_ids = filtered_product_ids(conn, profile, status_filter)
+    visible_count = len(all_ids)
 
     page_size = request.args.get("size", DEFAULT_PAGE_SIZE, type=int)
     if page_size not in ALLOWED_PAGE_SIZES:
@@ -534,31 +645,39 @@ def render_brand_page(profile: str):
     page = request.args.get("page", 1, type=int)
     page = min(max(page, 1), total_pages)
     offset = (page - 1) * page_size
-    query_params.extend([page_size, offset])
+    page_ids = all_ids[offset:offset + page_size]
 
-    products = conn.execute(
-        f"""SELECT pr.*, p.post_url FROM product pr
-           JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? {list_filter}
-           ORDER BY pr.id DESC LIMIT ? OFFSET ?""", query_params
-    ).fetchall()
+    if page_ids:
+        placeholders = ",".join("?" for _ in page_ids)
+        rows = conn.execute(
+            f"""SELECT pr.*, p.post_url FROM product pr
+               JOIN instagram_post p ON p.id = pr.post_id
+               WHERE pr.id IN ({placeholders})""", page_ids
+        ).fetchall()
+        rows_by_id = {row["id"]: row for row in rows}
+        products = [rows_by_id[i] for i in page_ids if i in rows_by_id]
+    else:
+        products = []
 
     back_url = quote(f"/brand/{profile}?page={page}&size={page_size}&status={status_filter}", safe="")
 
-    rows_html = []
+    cards_html = []
     for r in products:
         media = conn.execute(
             "SELECT id FROM media WHERE post_id = ? AND excluded = 0 ORDER BY position LIMIT 1", (r["post_id"],)
         ).fetchone()
-        img_tag = f'<img class="thumb" src="/media/{media["id"]}">' if media else ""
-        rows_html.append(ROW_TEMPLATE.format(
+        img_tag = (
+            f'<img class="thumb" src="/media/{media["id"]}" loading="lazy">'
+            if media else '<div class="thumb-empty">No photo yet</div>'
+        )
+        availability = r["availability_status"] or "UNKNOWN"
+        cards_html.append(PRODUCT_CARD_TEMPLATE.format(
+            review_flag='<div class="needs-review-flag">&#9888; Needs review</div>' if r["review_required"] else "",
             img=img_tag,
-            product_name=r["product_name"] or "<span style='color:#ccc'>—</span>",
-            brand=r["brand"] or "<span style='color:#ccc'>—</span>",
-            price=r["price"] or "<span style='color:#ccc'>—</span>",
-            availability=r["availability_status"] or "UNKNOWN",
-            review_class="review-yes" if r["review_required"] else "review-no",
-            review_text="⚠ review" if r["review_required"] else "ok",
+            product_name=r["product_name"] or "(no name yet)",
+            availability=availability,
+            availability_label=STATUS_LABELS.get(availability, availability),
+            price=f'GHS {r["price"]}' if r["price"] else "—",
             post_url=r["post_url"],
             product_id=r["id"],
             back=back_url,
@@ -623,7 +742,7 @@ def render_brand_page(profile: str):
         image_cleaned_count=image_cleaned_count,
         image_ready_total=image_ready_total,
         image_clean_pct=image_clean_pct,
-        rows="\n".join(rows_html),
+        product_cards="\n".join(cards_html) or "<p>No products in this view.</p>",
         pagination=pagination,
         page_size_links=page_size_links,
     )
@@ -644,7 +763,7 @@ def home():
         ).fetchone()[0]
         cards.append(
             f'<a class="brand-card" href="/brand/{quote(p)}">'
-            f'<div class="name">{p}</div>'
+            f'<div class="name"><span>{p}</span><span>&rarr;</span></div>'
             f'<div class="meta">{total_posts} posts collected &middot; {total_products} extracted</div>'
             f'</a>'
         )
@@ -716,6 +835,35 @@ def _existing_colors_for_profile(conn, profile, limit=80):
     return sorted((name for name, _ in canonical[:limit]), key=str.lower)
 
 
+def _parse_back(back_raw, fallback_profile):
+    """Pull the profile + status filter back out of a stored back-link like
+    /brand/chicstyle.ghana?page=2&size=50&status=review, so Prev/Next on the
+    edit page can walk the exact same filtered list the reviewer was
+    browsing instead of falling back to "all"."""
+    if not back_raw:
+        return fallback_profile, "all"
+    parsed = urlparse(back_raw)
+    qs = parse_qs(parsed.query)
+    profile = fallback_profile
+    if parsed.path.startswith("/brand/"):
+        profile = parsed.path[len("/brand/"):] or fallback_profile
+    status = qs.get("status", ["all"])[0]
+    return profile, status
+
+
+def _nav_buttons_html(prev_href, next_href, position_label):
+    prev = (
+        f'<a class="nav-btn" href="{prev_href}">&larr; Prev</a>' if prev_href
+        else '<span class="nav-btn disabled">&larr; Prev</span>'
+    )
+    nxt = (
+        f'<a class="nav-btn" href="{next_href}">Next &rarr;</a>' if next_href
+        else '<span class="nav-btn disabled">Next &rarr;</span>'
+    )
+    pos = f'<span class="nav-position">{position_label}</span>' if position_label else ""
+    return f'<div class="nav-buttons">{prev}{pos}{nxt}</div>'
+
+
 @app.route("/product/<int:product_id>")
 def product_edit(product_id):
     conn = get_conn()
@@ -734,9 +882,28 @@ def product_edit(product_id):
     ).fetchall()
     known_colors = _existing_colors_for_profile(conn, r["profile"])
     is_ready, missing = readiness_check(conn, product_id)
-    conn.close()
 
     back_param = request.args.get("back", "")
+    nav_profile, nav_status = _parse_back(back_param, r["profile"])
+    nav_ids = filtered_product_ids(conn, nav_profile, nav_status)
+    conn.close()
+
+    if product_id in nav_ids:
+        idx = nav_ids.index(product_id)
+        position_label = f"{idx + 1} of {len(nav_ids)} in this view"
+        prev_id = nav_ids[idx - 1] if idx > 0 else None
+        next_id = nav_ids[idx + 1] if idx < len(nav_ids) - 1 else None
+    else:
+        position_label = ""
+        prev_id = next_id = None
+
+    def _nav_link(pid):
+        return f"/product/{pid}?back={quote(back_param, safe='')}" if pid else None
+
+    prev_href = _nav_link(prev_id)
+    next_href = _nav_link(next_id)
+    nav_buttons = _nav_buttons_html(prev_href, next_href, position_label)
+
     images_html = "\n".join(
         f'<div class="edit-image-tile">'
         f'<img src="/media/{m["id"]}">'
@@ -780,16 +947,17 @@ def product_edit(product_id):
     back_href = request.args.get("back") or f"/brand/{r['profile']}"
     saved = request.args.get("saved") == "1"
     if saved:
+        next_cta = f' <a href="{next_href}">Next product &rarr;</a>' if next_href else ""
         if is_ready:
             saved_banner = (
-                '<div class="saved-banner ready">Saved &mdash; \U0001F680 this product is now '
-                f'<strong>Fully Ready</strong>. <a href="{back_href}">&larr; Back to list</a></div>'
+                '<div class="saved-banner ready">&#9989; Saved &mdash; \U0001F680 this product is now '
+                f'<strong>Fully Ready</strong>. <a href="{back_href}">&larr; Back to list</a>{next_cta}</div>'
             )
         else:
             missing_list = ", ".join(missing)
             saved_banner = (
                 f'<div class="saved-banner not-ready">Saved &mdash; still not Fully Ready. '
-                f'Missing: <strong>{missing_list}</strong>. <a href="{back_href}">&larr; Back to list</a></div>'
+                f'Missing: <strong>{missing_list}</strong>. <a href="{back_href}">&larr; Back to list</a>{next_cta}</div>'
             )
     else:
         saved_banner = ""
@@ -797,6 +965,7 @@ def product_edit(product_id):
     return EDIT_PAGE_TEMPLATE.format(
         style=STYLE,
         back_href=back_href,
+        nav_buttons=nav_buttons,
         profile=r["profile"],
         title=r["product_name"] or "(no name yet)",
         post_date=r["post_date"] or "",
