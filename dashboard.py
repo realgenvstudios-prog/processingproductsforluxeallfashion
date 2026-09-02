@@ -373,23 +373,25 @@ PAGE_TEMPLATE = """<!doctype html>
   </div>
 
   <div class="stats">
-    <div class="stat"><div class="value">{total_posts}</div><div class="label">Posts collected</div></div>
-    <div class="stat good"><div class="value">{total_products}</div><div class="label">Extracted</div></div>
-    <div class="stat warn"><div class="value">{pending}</div><div class="label">Pending</div></div>
-    <div class="stat"><div class="value">{is_product}</div><div class="label">Real products</div></div>
-    <div class="stat warn"><div class="value">{review_required}</div><div class="label">Needs review</div></div>
-    <div class="stat"><div class="value">{duplicates}</div><div class="label">Likely duplicates</div></div>
-    <div class="stat good"><div class="value">{fully_ready}</div><div class="label">Fully ready</div></div>
-    <div class="stat good"><div class="value">{available_count}</div><div class="label">Available</div></div>
-    <div class="stat"><div class="value">{sold_out_count}</div><div class="label">Sold out</div></div>
-    <div class="stat warn"><div class="value">{unknown_count}</div><div class="label">Unknown status</div></div>
+    <div class="stat"><div class="value" id="v-total_posts">{total_posts}</div><div class="label">Posts collected</div></div>
+    <div class="stat good"><div class="value" id="v-total_products">{total_products}</div><div class="label">Extracted</div></div>
+    <div class="stat warn"><div class="value" id="v-pending">{pending}</div><div class="label">Pending</div></div>
+    <div class="stat"><div class="value" id="v-is_product">{is_product}</div><div class="label">Real products</div></div>
+    <div class="stat warn"><div class="value" id="v-review_required">{review_required}</div><div class="label">Needs review</div></div>
+    <div class="stat"><div class="value" id="v-duplicates">{duplicates}</div><div class="label">Likely duplicates</div></div>
+    <div class="stat good"><div class="value" id="v-fully_ready">{fully_ready}</div><div class="label">Fully ready</div></div>
+    <div class="stat good"><div class="value" id="v-available_count">{available_count}</div><div class="label">Available</div></div>
+    <div class="stat"><div class="value" id="v-sold_out_count">{sold_out_count}</div><div class="label">Sold out</div></div>
+    <div class="stat warn"><div class="value" id="v-unknown_count">{unknown_count}</div><div class="label">Unknown status</div></div>
   </div>
 
-  <div class="progress-label"><span>Extraction progress</span><span class="pct">{pct}%</span></div>
-  <div class="progress-bar"><div class="progress-fill" style="width: {pct}%"></div></div>
+  <div class="progress-label"><span>Extraction progress</span><span class="pct" id="v-pct">{pct}%</span></div>
+  <div class="progress-bar"><div class="progress-fill" id="bar-pct" style="width: {pct}%"></div></div>
 
-  <div class="progress-label"><span>Image cleaning progress (fully-ready products only) &middot; {image_cleaned_count}/{image_ready_total}</span><span class="pct img-pct">{image_clean_pct}%</span></div>
-  <div class="progress-bar"><div class="progress-fill img-fill" style="width: {image_clean_pct}%"></div></div>
+  <div class="progress-label"><span>Image cleaning progress (fully-ready products only) &middot; <span id="v-image_progress">{image_cleaned_count}/{image_ready_total}</span></span><span class="pct img-pct" id="v-image_clean_pct">{image_clean_pct}%</span></div>
+  <div class="progress-bar"><div class="progress-fill img-fill" id="bar-image_clean_pct" style="width: {image_clean_pct}%"></div></div>
+
+  {stats_poll_script}
 
   {status_filters}
 
@@ -433,6 +435,47 @@ def _refresh_meta(seconds):
     if os.environ.get("PORT"):
         return "", ""
     return f'<meta http-equiv="refresh" content="{seconds}">', f"auto-refreshes every {seconds}s &middot; "
+
+
+def _stats_poll_script(profile):
+    """Deployed copy only: quietly re-fetch just the stat numbers and
+    progress bars every 20s and swap them in place -- no page reload, no
+    blink, and nothing else on the page (product grid, scroll position,
+    filters) ever moves. Local dev keeps the simple full meta-refresh
+    instead, so this only needs to exist in production."""
+    if not os.environ.get("PORT"):
+        return ""
+    return f"""<script>
+(function() {{
+  var profile = {json.dumps(profile)};
+  function setText(id, val) {{ var el = document.getElementById(id); if (el) el.textContent = val; }}
+  function setWidth(id, pct) {{ var el = document.getElementById(id); if (el) el.style.width = pct + '%'; }}
+  function poll() {{
+    fetch('/brand/' + encodeURIComponent(profile) + '/stats.json', {{cache: 'no-store'}})
+      .then(function(r) {{ return r.ok ? r.json() : null; }})
+      .then(function(d) {{
+        if (!d) return;
+        setText('v-total_posts', d.total_posts);
+        setText('v-total_products', d.total_products);
+        setText('v-pending', d.pending);
+        setText('v-is_product', d.is_product);
+        setText('v-review_required', d.review_required);
+        setText('v-duplicates', d.duplicates);
+        setText('v-fully_ready', d.fully_ready);
+        setText('v-available_count', d.available_count);
+        setText('v-sold_out_count', d.sold_out_count);
+        setText('v-unknown_count', d.unknown_count);
+        setText('v-pct', d.pct + '%');
+        setText('v-image_progress', d.image_cleaned_count + '/' + d.image_ready_total);
+        setText('v-image_clean_pct', d.image_clean_pct + '%');
+        setWidth('bar-pct', d.pct);
+        setWidth('bar-image_clean_pct', d.image_clean_pct);
+      }})
+      .catch(function() {{}});
+  }}
+  setInterval(poll, 20000);
+}})();
+</script>"""
 
 PRODUCT_CARD_TEMPLATE = """<div class="product-card">
   {review_flag}
@@ -659,13 +702,10 @@ def filtered_product_ids(conn, profile, status_filter):
     return [row["id"] for row in rows]
 
 
-def render_brand_page(profile: str):
-    conn = get_conn()
-    profiles = get_profiles(conn)
-    if profile not in profiles:
-        conn.close()
-        abort(404)
-
+def compute_brand_stats(conn, profile):
+    """All the numbers in the stats grid and progress bars, in one place --
+    shared by the full page render and the background stats.json poll so
+    the two can never drift out of sync with each other."""
     total_posts = conn.execute(
         "SELECT COUNT(*) FROM instagram_post WHERE profile = ?", (profile,)
     ).fetchone()[0]
@@ -706,6 +746,61 @@ def render_brand_page(profile: str):
     image_cleaned_count, image_ready_total = image_cleaning_progress(conn, profile)
     image_clean_pct = round((image_cleaned_count / image_ready_total) * 100) if image_ready_total else 0
     ready_to_ship_count = image_cleaned_count  # same set: fully-ready AND image-cleaned
+
+    return {
+        "total_posts": total_posts,
+        "total_products": total_products,
+        "is_product": is_product,
+        "review_required": review_required,
+        "duplicates": duplicates,
+        "fully_ready": fully_ready,
+        "available_count": available_count,
+        "sold_out_count": sold_out_count,
+        "unknown_count": unknown_count,
+        "pending": pending,
+        "pct": pct,
+        "image_cleaned_count": image_cleaned_count,
+        "image_ready_total": image_ready_total,
+        "image_clean_pct": image_clean_pct,
+        "ready_to_ship_count": ready_to_ship_count,
+    }
+
+
+@app.route("/brand/<profile>/stats.json")
+def brand_stats_json(profile):
+    conn = get_conn()
+    profiles = get_profiles(conn)
+    if profile not in profiles:
+        conn.close()
+        abort(404)
+    stats = compute_brand_stats(conn, profile)
+    conn.close()
+    return stats
+
+
+def render_brand_page(profile: str):
+    conn = get_conn()
+    profiles = get_profiles(conn)
+    if profile not in profiles:
+        conn.close()
+        abort(404)
+
+    stats = compute_brand_stats(conn, profile)
+    total_posts = stats["total_posts"]
+    total_products = stats["total_products"]
+    is_product = stats["is_product"]
+    review_required = stats["review_required"]
+    duplicates = stats["duplicates"]
+    fully_ready = stats["fully_ready"]
+    available_count = stats["available_count"]
+    sold_out_count = stats["sold_out_count"]
+    unknown_count = stats["unknown_count"]
+    pending = stats["pending"]
+    pct = stats["pct"]
+    image_cleaned_count = stats["image_cleaned_count"]
+    image_ready_total = stats["image_ready_total"]
+    image_clean_pct = stats["image_clean_pct"]
+    ready_to_ship_count = stats["ready_to_ship_count"]
 
     status_filter = request.args.get("status", "all")
     valid_statuses = set(FILTER_CLAUSES) | set(ID_FILTER_KEYS)
@@ -813,6 +908,7 @@ def render_brand_page(profile: str):
         style=STYLE,
         refresh_meta=refresh_meta,
         refresh_note=refresh_note,
+        stats_poll_script=_stats_poll_script(profile),
         title=profile,
         tabs=tabs,
         total_posts=total_posts,
