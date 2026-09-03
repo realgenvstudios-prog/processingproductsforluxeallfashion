@@ -29,6 +29,12 @@ CLEAN_IMAGES_ROOT = DATA_DIR / "clean_images"
 DEFAULT_PAGE_SIZE = 50
 ALLOWED_PAGE_SIZES = (20, 50, 100)
 
+# Anything posted before this date is outdated inventory the client asked
+# to be dropped from every view (stats, All, Available, Sold out, Needs
+# review, everywhere) across all three brands -- not deleted, just excluded
+# from the whole review dashboard's queries so it's fully reversible.
+MIN_POST_DATE = "2025-07-01"
+
 # Single shared password gate -- this dashboard can view AND edit/delete real
 # product data, so it can't be left open once it's off localhost. One
 # password for everyone (Ted + client) is intentional: nothing here is
@@ -667,8 +673,8 @@ FULLY_READY_SQL = """
 def fully_ready_ids(conn, profile):
     rows = conn.execute(
         f"""SELECT pr.id FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? {FULLY_READY_SQL}""",
-        (profile,),
+           WHERE p.profile = ? AND p.post_date >= ? {FULLY_READY_SQL}""",
+        (profile, MIN_POST_DATE),
     ).fetchall()
     return [r["id"] for r in rows]
 
@@ -749,8 +755,8 @@ def filtered_product_ids(conn, profile, status_filter):
     clause = FILTER_CLAUSES.get(status_filter, "")
     rows = conn.execute(
         f"""SELECT pr.id FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? {clause} ORDER BY pr.id DESC""",
-        (profile,),
+           WHERE p.profile = ? AND p.post_date >= ? {clause} ORDER BY pr.id DESC""",
+        (profile, MIN_POST_DATE),
     ).fetchall()
     return [row["id"] for row in rows]
 
@@ -760,38 +766,39 @@ def compute_brand_stats(conn, profile):
     shared by the full page render and the background stats.json poll so
     the two can never drift out of sync with each other."""
     total_posts = conn.execute(
-        "SELECT COUNT(*) FROM instagram_post WHERE profile = ?", (profile,)
+        "SELECT COUNT(*) FROM instagram_post WHERE profile = ? AND post_date >= ?", (profile, MIN_POST_DATE)
     ).fetchone()[0]
     total_products = conn.execute(
         """SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ?""", (profile,)
+           WHERE p.profile = ? AND p.post_date >= ?""", (profile, MIN_POST_DATE)
     ).fetchone()[0]
     is_product = conn.execute(
         """SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND pr.is_product_post = 1""", (profile,)
+           WHERE p.profile = ? AND p.post_date >= ? AND pr.is_product_post = 1""", (profile, MIN_POST_DATE)
     ).fetchone()[0]
     review_required = conn.execute(
         """SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND pr.review_required = 1
-             AND (pr.availability_status IS NULL OR pr.availability_status != 'SOLD_OUT')""", (profile,)
+           WHERE p.profile = ? AND p.post_date >= ? AND pr.review_required = 1
+             AND (pr.availability_status IS NULL OR pr.availability_status != 'SOLD_OUT')""", (profile, MIN_POST_DATE)
     ).fetchone()[0]
     duplicates = conn.execute(
         """SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND pr.duplicate_of IS NOT NULL""", (profile,)
+           WHERE p.profile = ? AND p.post_date >= ? AND pr.duplicate_of IS NOT NULL""", (profile, MIN_POST_DATE)
     ).fetchone()[0]
     fully_ready = len(fully_ready_ids(conn, profile))
     available_count = conn.execute(
         """SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND pr.availability_status = 'AVAILABLE'""", (profile,)
+           WHERE p.profile = ? AND p.post_date >= ? AND pr.availability_status = 'AVAILABLE'""", (profile, MIN_POST_DATE)
     ).fetchone()[0]
     sold_out_count = conn.execute(
         """SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND pr.availability_status = 'SOLD_OUT'""", (profile,)
+           WHERE p.profile = ? AND p.post_date >= ? AND pr.availability_status = 'SOLD_OUT'""", (profile, MIN_POST_DATE)
     ).fetchone()[0]
     unknown_count = conn.execute(
         """SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND (pr.availability_status IS NULL OR pr.availability_status = 'UNKNOWN')""",
-        (profile,),
+           WHERE p.profile = ? AND p.post_date >= ?
+             AND (pr.availability_status IS NULL OR pr.availability_status = 'UNKNOWN')""",
+        (profile, MIN_POST_DATE),
     ).fetchone()[0]
     pending = max(total_posts - total_products, 0)
     pct = round((total_products / total_posts) * 100) if total_posts else 0
@@ -992,11 +999,11 @@ def home():
     cards = []
     for p in profiles:
         total_posts = conn.execute(
-            "SELECT COUNT(*) FROM instagram_post WHERE profile = ?", (p,)
+            "SELECT COUNT(*) FROM instagram_post WHERE profile = ? AND post_date >= ?", (p, MIN_POST_DATE)
         ).fetchone()[0]
         total_products = conn.execute(
             """SELECT COUNT(*) FROM product pr JOIN instagram_post ip ON ip.id = pr.post_id
-               WHERE ip.profile = ?""", (p,)
+               WHERE ip.profile = ? AND ip.post_date >= ?""", (p, MIN_POST_DATE)
         ).fetchone()[0]
         cards.append(
             f'<a class="brand-card" href="/brand/{quote(p)}">'
