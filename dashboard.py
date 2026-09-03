@@ -10,12 +10,14 @@ Each Instagram profile (brand) gets its own page: /brand/<profile>
 import hmac
 import json
 import os
+import secrets
 import sqlite3
 import uuid
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import quote, urlparse, parse_qs
 
-from flask import Flask, Response, abort, redirect, request, send_file
+from flask import Flask, abort, redirect, request, send_file, session
 
 from intelligence.extraction import CATEGORY_SETS
 
@@ -36,17 +38,68 @@ ALLOWED_PAGE_SIZES = (20, 50, 100)
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "localdev")
 
 app = Flask(__name__)
+# Sessions (not HTTP Basic Auth) so a login survives the reviewer leaving
+# and coming back later -- Basic Auth's credential cache is only held by
+# the browser in memory and mobile Safari routinely drops it when the app
+# is backgrounded or the tab is reclaimed under memory pressure, forcing a
+# fresh login every few minutes. A cookie-backed session with a long
+# lifetime doesn't have that problem. FLASK_SECRET_KEY must be set (and
+# stable) in production -- a random fallback would invalidate every
+# session on each redeploy, defeating the point.
+app.secret_key = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = bool(os.environ.get("PORT"))  # HTTPS-only in production; local dev has no HTTPS
+
+LOGIN_PAGE = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Catalog Review Login</title>
+<style>{style}</style>
+</head>
+<body>
+  <div style="max-width: 360px; margin: 80px auto 0;">
+    <h1>Catalog Review</h1>
+    <div class="subtitle">Enter the password to continue</div>
+    <form method="post" class="section-card">
+      <input type="hidden" name="next" value="{next_url}">
+      <div class="field">
+        <label>Password</label>
+        <input type="password" name="password" autofocus>
+      </div>
+      {error}
+      <button type="submit" class="save-btn" style="width: 100%;">Log in</button>
+    </form>
+  </div>
+</body>
+</html>
+"""
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    next_url = request.values.get("next") or "/"
+    error = ""
+    if request.method == "POST":
+        password = request.form.get("password", "")
+        if hmac.compare_digest(password, DASHBOARD_PASSWORD):
+            session.permanent = True
+            session["authed"] = True
+            return redirect(next_url)
+        error = '<p style="color: #dc2626; font-size: 13px; margin: -8px 0 16px;">Wrong password.</p>'
+    return LOGIN_PAGE.format(style=STYLE, next_url=next_url, error=error)
 
 
 @app.before_request
 def require_auth():
     if not os.environ.get("PORT"):
         return  # local dev (`python dashboard.py`) -- no password needed on localhost
-    auth = request.authorization
-    if not auth or not hmac.compare_digest(auth.password or "", DASHBOARD_PASSWORD):
-        return Response(
-            "Login required.", 401, {"WWW-Authenticate": 'Basic realm="Catalog Review"'}
-        )
+    if request.endpoint == "login":
+        return
+    if not session.get("authed"):
+        return redirect(f"/login?next={quote(request.full_path, safe='')}")
 
 
 def get_conn():
@@ -238,10 +291,10 @@ STYLE = """
   .field { margin-bottom: 18px; }
   .field:last-child { margin-bottom: 0; }
   .field label { display: block; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; color: #888; margin-bottom: 6px; }
-  .field input[type=text] {
+  .field input[type=text], .field input[type=password] {
     width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; box-sizing: border-box;
   }
-  .field input[type=text]:focus, .field select:focus { outline: none; border-color: #1a1a1a; }
+  .field input[type=text]:focus, .field input[type=password]:focus, .field select:focus { outline: none; border-color: #1a1a1a; }
   .field select {
     width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px;
     box-sizing: border-box; background: #fff; font-family: inherit;
@@ -338,7 +391,7 @@ STYLE = """
     .upload-btn { padding: 10px; }
 
     /* 16px prevents iOS Safari from auto-zooming in when a field is tapped */
-    .field input[type=text], .field select { font-size: 16px; padding: 12px; }
+    .field input[type=text], .field input[type=password], .field select { font-size: 16px; padding: 12px; }
     .color-picker label, .status-toggle label { padding: 8px 13px; }
 
     .save-row { flex-direction: column; align-items: stretch; }
