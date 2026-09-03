@@ -1,27 +1,34 @@
 """
 One-way, insert-only merge: copies any Instagram posts (and their
-product/media rows) that exist in the local catalog.db but not in the
-Railway copy, into a working copy of the Railway DB -- without ever
-touching a row that already exists there.
+product/media rows, AND the actual image files those media rows point at)
+that exist locally but not in the Railway copy, into the deployed
+dashboard -- without ever touching a row that already exists there.
 
 This replaces a raw `cat catalog.db | ssh ... > /data/catalog.db` full-file
 overwrite, which was used earlier and silently destroyed a reviewer's live
 edit on the deployed dashboard the moment it ran. Existing rows on the
-Railway copy are exactly where review edits live, so this script only ever
-INSERTs brand-new posts (identified by shortcode, which is unique) -- it
-never UPDATEs or DELETEs anything that's already there.
+Railway copy are exactly where review edits live, so the database merge
+only ever INSERTs brand-new posts (identified by shortcode, which is
+unique) -- it never UPDATEs or DELETEs anything that's already there.
+
+Syncing "new posts" without also syncing their image files leaves the
+dashboard showing broken photos for everything just added, which defeats
+the point -- so every run uploads the new posts' images too, in the same
+command, not as a separate step someone has to remember.
 
 Usage:
-    python sync_to_railway.py            # merge and push
-    python sync_to_railway.py --dry-run  # merge into a scratch copy, don't push
+    python sync_to_railway.py            # merge and push (db + images)
+    python sync_to_railway.py --dry-run  # merge into a scratch copy, don't push anything
 """
 import argparse
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 from pathlib import Path
 
-LOCAL_DB = Path(__file__).parent / "data" / "catalog.db"
+DATA_DIR = Path(__file__).parent / "data"
+LOCAL_DB = DATA_DIR / "catalog.db"
 TMP_LIVE = Path("/tmp/railway_sync_live.db")
 SSH_ARGS = [
     "railway", "ssh", "-s", "dashboard",
@@ -39,16 +46,51 @@ def push_live(src: Path):
         subprocess.run(SSH_ARGS + ["--", "cat > /data/catalog.db"], stdin=f, check=True)
 
 
+def upload_images(local_paths: list[str]) -> int:
+    """Tar up exactly the given local image files (paths relative to
+    DATA_DIR) and extract them into /data on the volume -- same tar-over-ssh
+    approach as the original bulk uploads, just scoped to only what's new."""
+    rel_paths = []
+    for p in local_paths:
+        marker = "data/"
+        idx = p.replace("\\", "/").rfind(marker)
+        if idx == -1:
+            continue
+        rel = p[idx + len(marker):]
+        if (DATA_DIR / rel).exists():
+            rel_paths.append(rel)
+
+    if not rel_paths:
+        return 0
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write("\n".join(rel_paths))
+        filelist = f.name
+
+    tar = subprocess.Popen(
+        ["tar", "czf", "-", "-C", str(DATA_DIR), "-T", filelist],
+        stdout=subprocess.PIPE,
+    )
+    extract = subprocess.run(
+        SSH_ARGS + ["--", "cd /data && tar xzf -"],
+        stdin=tar.stdout,
+        check=True,
+    )
+    tar.stdout.close()
+    tar.wait()
+    Path(filelist).unlink(missing_ok=True)
+    return len(rel_paths)
+
+
 def merge(live_path: Path):
     local = sqlite3.connect(LOCAL_DB)
     live = sqlite3.connect(live_path)
     local.row_factory = sqlite3.Row
+    live.row_factory = sqlite3.Row
 
-    live_shortcodes = {r[0] for r in live.execute("SELECT shortcode FROM instagram_post")}
-    new_posts = [
-        p for p in local.execute("SELECT * FROM instagram_post").fetchall()
-        if p["shortcode"] not in live_shortcodes
-    ]
+    live_posts_by_shortcode = {r["shortcode"]: r["id"] for r in live.execute("SELECT id, shortcode FROM instagram_post")}
+    all_local_posts = local.execute("SELECT * FROM instagram_post").fetchall()
+    new_posts = [p for p in all_local_posts if p["shortcode"] not in live_posts_by_shortcode]
 
     post_id_map = {}
     product_id_map = {}
@@ -63,6 +105,7 @@ def merge(live_path: Path):
         post_id_map[post["id"]] = cur.lastrowid
 
     media_count = 0
+    image_paths = []
     for old_post_id, new_post_id in post_id_map.items():
         for prod in local.execute("SELECT * FROM product WHERE post_id = ?", (old_post_id,)):
             cur = live.execute(
@@ -88,6 +131,44 @@ def merge(live_path: Path):
                  m["phash"], m["excluded"], m["added_by_reviewer"]),
             )
             media_count += 1
+            if m["local_path"]:
+                image_paths.append(m["local_path"])
+
+    # Posts that already existed on both sides can still gain a product row
+    # locally after the fact -- collection creates the post immediately,
+    # extraction fills in its product later, often much later, in a
+    # separate long-running process. Catch those too: any shared post where
+    # live has zero product rows but local has one or more. (Skips posts
+    # live already has at least one product for, to avoid guessing which
+    # of several products on a multi-product post is the "new" one.)
+    late_extracted_count = 0
+    for post in all_local_posts:
+        live_post_id = live_posts_by_shortcode.get(post["shortcode"])
+        if live_post_id is None or post["id"] in post_id_map:
+            continue  # brand-new post, already handled above
+        local_products = local.execute("SELECT * FROM product WHERE post_id = ?", (post["id"],)).fetchall()
+        if not local_products:
+            continue
+        already_has_product = live.execute(
+            "SELECT 1 FROM product WHERE post_id = ? LIMIT 1", (live_post_id,)
+        ).fetchone()
+        if already_has_product:
+            continue
+        for prod in local_products:
+            cur = live.execute(
+                """INSERT INTO product (post_id, is_product_post, product_name, brand, category,
+                     description, price, currency, sizes, colors, availability_status,
+                     confidence_json, review_required, review_reason, duplicate_of, dedup_score,
+                     raw_extraction_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (live_post_id, prod["is_product_post"], prod["product_name"], prod["brand"],
+                 prod["category"], prod["description"], prod["price"], prod["currency"],
+                 prod["sizes"], prod["colors"], prod["availability_status"], prod["confidence_json"],
+                 prod["review_required"], prod["review_reason"], None, prod["dedup_score"],
+                 prod["raw_extraction_json"], prod["created_at"]),
+            )
+            product_id_map[prod["id"]] = cur.lastrowid
+            late_extracted_count += 1
 
     # duplicate_of on a newly-inserted product either points at another
     # product inserted in this same batch (remap it) or at a pre-existing
@@ -102,7 +183,7 @@ def merge(live_path: Path):
     live.commit()
     local.close()
     live.close()
-    return len(post_id_map), len(product_id_map), media_count
+    return len(post_id_map), len(product_id_map), media_count, image_paths, late_extracted_count
 
 
 if __name__ == "__main__":
@@ -113,15 +194,21 @@ if __name__ == "__main__":
     print("pulling live catalog.db from Railway...")
     pull_live(TMP_LIVE)
 
-    posts, products, media = merge(TMP_LIVE)
-    print(f"merged {posts} new post(s), {products} new product(s), {media} new media row(s)")
+    posts, products, media, image_paths, late_extracted = merge(TMP_LIVE)
+    print(
+        f"merged {posts} new post(s), {products} new product(s) "
+        f"({late_extracted} of those from posts already on Railway that finished extracting since), "
+        f"{media} new media row(s)"
+    )
 
-    if posts == 0:
+    if posts == 0 and products == 0:
         print("nothing new -- not pushing")
     elif args.dry_run:
         scratch = Path("/tmp/railway_sync_dry_run.db")
         shutil.copy(TMP_LIVE, scratch)
-        print(f"dry run -- merged result saved to {scratch}, NOT pushed to Railway")
+        print(f"dry run -- merged result saved to {scratch}, NOT pushed (db or images)")
     else:
         push_live(TMP_LIVE)
         print("pushed merged database back to Railway")
+        uploaded = upload_images(image_paths)
+        print(f"uploaded {uploaded} new image file(s) to the volume")
