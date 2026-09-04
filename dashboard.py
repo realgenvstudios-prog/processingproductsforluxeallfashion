@@ -241,6 +241,8 @@ STYLE = """
   }
   .pmeta { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
   .pmeta .price { font-size: 13px; font-weight: 700; color: #1a1a1a; }
+  .duplicate-info { display: block; margin-top: 6px; font-size: 11px; color: #b45309; font-weight: 600; }
+  .duplicate-info:hover { text-decoration: underline; }
   .pactions { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px 12px; }
   .review-btn {
     background: #1a1a1a; color: #fff; font-size: 12px; font-weight: 600; padding: 7px 12px;
@@ -545,6 +547,7 @@ PRODUCT_CARD_TEMPLATE = """<div class="product-card">
       <span class="badge {availability}">{availability_label}</span>
       <span class="price">{price}</span>
     </div>
+    {duplicate_info}
   </div>
   <div class="pactions">
     <a class="review-btn" href="/product/{product_id}?back={back}">Review &amp; Edit</a>
@@ -556,6 +559,11 @@ PRODUCT_CARD_TEMPLATE = """<div class="product-card">
 QUICK_UNREADY_TEMPLATE = """<form class="quick-action" method="post" action="/product/{product_id}/unready">
   <input type="hidden" name="back" value="{back}">
   <button type="submit" class="unready-btn" onclick="return confirm('Send this back to Needs review?')">Remove from ready</button>
+</form>"""
+
+QUICK_NOT_DUPLICATE_TEMPLATE = """<form class="quick-action" method="post" action="/product/{product_id}/not-duplicate">
+  <input type="hidden" name="back" value="{back}">
+  <button type="submit" class="unready-btn">Not a duplicate</button>
 </form>"""
 
 EDIT_PAGE_TEMPLATE = """<!doctype html>
@@ -762,6 +770,7 @@ FILTER_CLAUSES = {
     # the Sold out tab. Excluded here regardless of how review_required
     # happened to be left set, so stale flags can't leak into this count.
     "review": "AND pr.review_required = 1 AND (pr.availability_status IS NULL OR pr.availability_status != 'SOLD_OUT')",
+    "duplicates": "AND pr.duplicate_of IS NOT NULL",
 }
 ID_FILTER_KEYS = ("fully_ready", "ready_to_ship")
 
@@ -942,12 +951,19 @@ def render_brand_page(profile: str):
             availability=availability,
             availability_label=STATUS_LABELS.get(availability, availability),
             price=f'GHS {r["price"]}' if r["price"] else "No price yet",
+            duplicate_info=(
+                f'<a class="duplicate-info" href="/product/{r["duplicate_of"]}?back={back_url}">'
+                f'Possible duplicate of #{r["duplicate_of"]} &rarr;</a>'
+                if r["duplicate_of"] else ""
+            ),
             post_url=r["post_url"],
             product_id=r["id"],
             back=back_url,
             quick_action=(
                 QUICK_UNREADY_TEMPLATE.format(product_id=r["id"], back=back_plain)
-                if status_filter in ("fully_ready", "ready_to_ship") else ""
+                if status_filter in ("fully_ready", "ready_to_ship")
+                else QUICK_NOT_DUPLICATE_TEMPLATE.format(product_id=r["id"], back=back_plain)
+                if status_filter == "duplicates" else ""
             ),
         ))
 
@@ -996,6 +1012,7 @@ def render_brand_page(profile: str):
         ("available", f"Available ({available_count})"),
         ("sold_out", f"Sold out ({sold_out_count})"),
         ("review", f"Needs review ({review_required})"),
+        ("duplicates", f"Likely duplicates ({duplicates})"),
         ("fully_ready", f"Fully ready ({fully_ready})"),
         ("ready_to_ship", f"Ready to ship ({ready_to_ship_count})"),
     ]
@@ -1363,6 +1380,19 @@ def product_unready(product_id):
     # when a reviewer spots a problem while just scanning photos.
     conn = get_conn()
     conn.execute("UPDATE product SET review_required = 1 WHERE id = ?", (product_id,))
+    conn.commit()
+    conn.close()
+    back = request.form.get("back", "")
+    return redirect(back or "/")
+
+
+@app.route("/product/<int:product_id>/not-duplicate", methods=["POST"])
+def product_not_duplicate(product_id):
+    # One-click dismissal for a false-positive dedup match, straight from
+    # the Likely duplicates grid -- clears the flag without opening the
+    # full edit form, which never exposed duplicate_of anyway.
+    conn = get_conn()
+    conn.execute("UPDATE product SET duplicate_of = NULL, dedup_score = NULL WHERE id = ?", (product_id,))
     conn.commit()
     conn.close()
     back = request.form.get("back", "")
