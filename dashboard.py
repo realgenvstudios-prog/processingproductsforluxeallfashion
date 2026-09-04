@@ -438,14 +438,12 @@ PAGE_TEMPLATE = """<!doctype html>
   <div class="stats">
     <div class="stat"><div class="value" id="v-total_posts">{total_posts}</div><div class="label">Posts collected</div></div>
     <div class="stat good"><div class="value" id="v-total_products">{total_products}</div><div class="label">Extracted</div></div>
-    <div class="stat warn"><div class="value" id="v-pending">{pending}</div><div class="label">Pending</div></div>
     <div class="stat"><div class="value" id="v-is_product">{is_product}</div><div class="label">Real products</div></div>
     <div class="stat warn"><div class="value" id="v-review_required">{review_required}</div><div class="label">Needs review</div></div>
     <div class="stat"><div class="value" id="v-duplicates">{duplicates}</div><div class="label">Likely duplicates</div></div>
     <div class="stat good"><div class="value" id="v-fully_ready">{fully_ready}</div><div class="label">Fully ready</div></div>
     <div class="stat good"><div class="value" id="v-available_count">{available_count}</div><div class="label">Available</div></div>
     <div class="stat"><div class="value" id="v-sold_out_count">{sold_out_count}</div><div class="label">Sold out</div></div>
-    <div class="stat warn"><div class="value" id="v-unknown_count">{unknown_count}</div><div class="label">Unknown status</div></div>
   </div>
 
   <div class="progress-label"><span>Extraction progress</span><span class="pct" id="v-pct">{pct}%</span></div>
@@ -520,14 +518,12 @@ def _stats_poll_script(profile):
         if (!d) return;
         setText('v-total_posts', d.total_posts);
         setText('v-total_products', d.total_products);
-        setText('v-pending', d.pending);
         setText('v-is_product', d.is_product);
         setText('v-review_required', d.review_required);
         setText('v-duplicates', d.duplicates);
         setText('v-fully_ready', d.fully_ready);
         setText('v-available_count', d.available_count);
         setText('v-sold_out_count', d.sold_out_count);
-        setText('v-unknown_count', d.unknown_count);
         setText('v-pct', d.pct + '%');
         setText('v-image_progress', d.image_cleaned_count + '/' + d.image_ready_total);
         setText('v-image_clean_pct', d.image_clean_pct + '%');
@@ -761,7 +757,6 @@ FILTER_CLAUSES = {
     "all": "",
     "available": "AND pr.availability_status = 'AVAILABLE'",
     "sold_out": "AND pr.availability_status = 'SOLD_OUT'",
-    "unknown": "AND (pr.availability_status IS NULL OR pr.availability_status = 'UNKNOWN')",
     # Sold-out items are never review work -- once a product is sold out
     # nobody (system or human) needs to touch it again, it just belongs on
     # the Sold out tab. Excluded here regardless of how review_required
@@ -832,13 +827,6 @@ def compute_brand_stats(conn, profile, month_filter=None):
            WHERE p.profile = ? AND p.post_date >= ? AND p.media_type != 'video' {mc} AND pr.availability_status = 'SOLD_OUT'""",
         [profile, MIN_POST_DATE] + mp,
     ).fetchone()[0]
-    unknown_count = conn.execute(
-        f"""SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND p.post_date >= ? AND p.media_type != 'video' {mc}
-             AND (pr.availability_status IS NULL OR pr.availability_status = 'UNKNOWN')""",
-        [profile, MIN_POST_DATE] + mp,
-    ).fetchone()[0]
-    pending = max(total_posts - total_products, 0)
     pct = round((total_products / total_posts) * 100) if total_posts else 0
 
     image_cleaned_count, image_ready_total = image_cleaning_progress(conn, profile, month_filter)
@@ -854,8 +842,6 @@ def compute_brand_stats(conn, profile, month_filter=None):
         "fully_ready": fully_ready,
         "available_count": available_count,
         "sold_out_count": sold_out_count,
-        "unknown_count": unknown_count,
-        "pending": pending,
         "pct": pct,
         "image_cleaned_count": image_cleaned_count,
         "image_ready_total": image_ready_total,
@@ -898,8 +884,6 @@ def render_brand_page(profile: str):
     fully_ready = stats["fully_ready"]
     available_count = stats["available_count"]
     sold_out_count = stats["sold_out_count"]
-    unknown_count = stats["unknown_count"]
-    pending = stats["pending"]
     pct = stats["pct"]
     image_cleaned_count = stats["image_cleaned_count"]
     image_ready_total = stats["image_ready_total"]
@@ -1011,7 +995,6 @@ def render_brand_page(profile: str):
         ("all", f"All ({total_products})"),
         ("available", f"Available ({available_count})"),
         ("sold_out", f"Sold out ({sold_out_count})"),
-        ("unknown", f"Unknown status ({unknown_count})"),
         ("review", f"Needs review ({review_required})"),
         ("fully_ready", f"Fully ready ({fully_ready})"),
         ("ready_to_ship", f"Ready to ship ({ready_to_ship_count})"),
@@ -1034,14 +1017,12 @@ def render_brand_page(profile: str):
         tabs=tabs,
         total_posts=total_posts,
         total_products=total_products,
-        pending=pending,
         is_product=is_product,
         review_required=review_required,
         duplicates=duplicates,
         fully_ready=fully_ready,
         available_count=available_count,
         sold_out_count=sold_out_count,
-        unknown_count=unknown_count,
         status_filters=status_filters,
         pct=pct,
         image_cleaned_count=image_cleaned_count,
