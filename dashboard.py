@@ -13,7 +13,7 @@ import os
 import secrets
 import sqlite3
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote, urlparse, parse_qs
 
@@ -125,9 +125,13 @@ STYLE = """
     padding: 32px 40px 120px;
   }
   .table-wrap { overflow-x: auto; }
-  .page-size { display: flex; align-items: center; gap: 8px; margin: 10px 0 20px; font-size: 13px; color: #888; }
+  .page-size { display: flex; align-items: center; gap: 8px; margin: 10px 0 20px; font-size: 13px; color: #888; flex-wrap: wrap; }
   .page-size a {
     padding: 3px 10px; border-radius: 6px; color: #555; background: #f4f4f4;
+  }
+  .month-filter {
+    padding: 4px 8px; border-radius: 6px; border: 1px solid #ddd; background: #fff;
+    font-size: 12px; color: #333; font-family: inherit;
   }
   .page-size a.active { background: #1a1a1a; color: #fff; }
   h1 { font-size: 22px; font-weight: 700; margin: 0 0 4px; }
@@ -454,7 +458,7 @@ PAGE_TEMPLATE = """<!doctype html>
 
   {status_filters}
 
-  <div class="page-size">Show: {page_size_links}</div>
+  <div class="page-size">Show: {page_size_links} &middot; Month: {month_filter_html}</div>
 
   <div class="product-grid">
     {product_cards}
@@ -670,11 +674,34 @@ FULLY_READY_SQL = """
              AND (SELECT COUNT(*) FROM media m WHERE m.post_id = pr.post_id AND m.excluded = 0) > 2"""
 
 
-def fully_ready_ids(conn, profile):
+def _month_clause(month_filter, column="p.post_date"):
+    """Optional 'YYYY-MM' narrowing on top of the MIN_POST_DATE cutoff --
+    used everywhere a query already filters by post_date so a month
+    selection can layer on without duplicating every query."""
+    if month_filter and month_filter != "all":
+        return f"AND strftime('%Y-%m', {column}) = ?", [month_filter]
+    return "", []
+
+
+def available_months(conn, profile):
+    """Distinct 'YYYY-MM' values present for this profile, newest first --
+    populates the month filter dropdown. Scoped to the same MIN_POST_DATE
+    cutoff so the dropdown never offers a month that's already excluded
+    everywhere else."""
+    rows = conn.execute(
+        """SELECT DISTINCT strftime('%Y-%m', post_date) as ym FROM instagram_post
+           WHERE profile = ? AND post_date >= ? ORDER BY ym DESC""",
+        (profile, MIN_POST_DATE),
+    ).fetchall()
+    return [r["ym"] for r in rows if r["ym"]]
+
+
+def fully_ready_ids(conn, profile, month_filter=None):
+    month_clause, month_params = _month_clause(month_filter)
     rows = conn.execute(
         f"""SELECT pr.id FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND p.post_date >= ? {FULLY_READY_SQL}""",
-        (profile, MIN_POST_DATE),
+           WHERE p.profile = ? AND p.post_date >= ? {month_clause} {FULLY_READY_SQL}""",
+        [profile, MIN_POST_DATE] + month_params,
     ).fetchall()
     return [r["id"] for r in rows]
 
@@ -718,16 +745,16 @@ def has_cleaned_image(profile, product_id):
     return product_dir.is_dir() and any(product_dir.glob("*.png"))
 
 
-def image_cleaning_progress(conn, profile):
-    ids = fully_ready_ids(conn, profile)
+def image_cleaning_progress(conn, profile, month_filter=None):
+    ids = fully_ready_ids(conn, profile, month_filter)
     if not ids:
         return 0, 0
     cleaned = sum(1 for pid in ids if has_cleaned_image(profile, pid))
     return cleaned, len(ids)
 
 
-def ready_to_ship_ids(conn, profile):
-    return [pid for pid in fully_ready_ids(conn, profile) if has_cleaned_image(profile, pid)]
+def ready_to_ship_ids(conn, profile, month_filter=None):
+    return [pid for pid in fully_ready_ids(conn, profile, month_filter) if has_cleaned_image(profile, pid)]
 
 
 FILTER_CLAUSES = {
@@ -744,66 +771,77 @@ FILTER_CLAUSES = {
 ID_FILTER_KEYS = ("fully_ready", "ready_to_ship")
 
 
-def filtered_product_ids(conn, profile, status_filter):
-    """Full list of product ids (newest first) matching one status filter --
-    shared by the brand page (for counting/paging) and the edit page's
-    Prev/Next nav, so both always agree on exactly the same ordered list."""
+def filtered_product_ids(conn, profile, status_filter, month_filter=None):
+    """Full list of product ids (newest first) matching one status filter
+    and optional month -- shared by the brand page (for counting/paging)
+    and the edit page's Prev/Next nav, so both always agree on exactly the
+    same ordered list."""
     if status_filter == "fully_ready":
-        return sorted(fully_ready_ids(conn, profile), reverse=True)
+        return sorted(fully_ready_ids(conn, profile, month_filter), reverse=True)
     if status_filter == "ready_to_ship":
-        return sorted(ready_to_ship_ids(conn, profile), reverse=True)
+        return sorted(ready_to_ship_ids(conn, profile, month_filter), reverse=True)
     clause = FILTER_CLAUSES.get(status_filter, "")
+    month_clause, month_params = _month_clause(month_filter)
     rows = conn.execute(
         f"""SELECT pr.id FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND p.post_date >= ? {clause} ORDER BY pr.id DESC""",
-        (profile, MIN_POST_DATE),
+           WHERE p.profile = ? AND p.post_date >= ? {month_clause} {clause} ORDER BY pr.id DESC""",
+        [profile, MIN_POST_DATE] + month_params,
     ).fetchall()
     return [row["id"] for row in rows]
 
 
-def compute_brand_stats(conn, profile):
+def compute_brand_stats(conn, profile, month_filter=None):
     """All the numbers in the stats grid and progress bars, in one place --
     shared by the full page render and the background stats.json poll so
     the two can never drift out of sync with each other."""
+    mc_post, mp_post = _month_clause(month_filter, column="post_date")
+    mc, mp = _month_clause(month_filter)
+
     total_posts = conn.execute(
-        "SELECT COUNT(*) FROM instagram_post WHERE profile = ? AND post_date >= ?", (profile, MIN_POST_DATE)
+        f"SELECT COUNT(*) FROM instagram_post WHERE profile = ? AND post_date >= ? {mc_post}",
+        [profile, MIN_POST_DATE] + mp_post,
     ).fetchone()[0]
     total_products = conn.execute(
-        """SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND p.post_date >= ?""", (profile, MIN_POST_DATE)
+        f"""SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
+           WHERE p.profile = ? AND p.post_date >= ? {mc}""", [profile, MIN_POST_DATE] + mp
     ).fetchone()[0]
     is_product = conn.execute(
-        """SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND p.post_date >= ? AND pr.is_product_post = 1""", (profile, MIN_POST_DATE)
+        f"""SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
+           WHERE p.profile = ? AND p.post_date >= ? {mc} AND pr.is_product_post = 1""",
+        [profile, MIN_POST_DATE] + mp,
     ).fetchone()[0]
     review_required = conn.execute(
-        """SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND p.post_date >= ? AND pr.review_required = 1
-             AND (pr.availability_status IS NULL OR pr.availability_status != 'SOLD_OUT')""", (profile, MIN_POST_DATE)
+        f"""SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
+           WHERE p.profile = ? AND p.post_date >= ? {mc} AND pr.review_required = 1
+             AND (pr.availability_status IS NULL OR pr.availability_status != 'SOLD_OUT')""",
+        [profile, MIN_POST_DATE] + mp,
     ).fetchone()[0]
     duplicates = conn.execute(
-        """SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND p.post_date >= ? AND pr.duplicate_of IS NOT NULL""", (profile, MIN_POST_DATE)
+        f"""SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
+           WHERE p.profile = ? AND p.post_date >= ? {mc} AND pr.duplicate_of IS NOT NULL""",
+        [profile, MIN_POST_DATE] + mp,
     ).fetchone()[0]
-    fully_ready = len(fully_ready_ids(conn, profile))
+    fully_ready = len(fully_ready_ids(conn, profile, month_filter))
     available_count = conn.execute(
-        """SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND p.post_date >= ? AND pr.availability_status = 'AVAILABLE'""", (profile, MIN_POST_DATE)
+        f"""SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
+           WHERE p.profile = ? AND p.post_date >= ? {mc} AND pr.availability_status = 'AVAILABLE'""",
+        [profile, MIN_POST_DATE] + mp,
     ).fetchone()[0]
     sold_out_count = conn.execute(
-        """SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND p.post_date >= ? AND pr.availability_status = 'SOLD_OUT'""", (profile, MIN_POST_DATE)
+        f"""SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
+           WHERE p.profile = ? AND p.post_date >= ? {mc} AND pr.availability_status = 'SOLD_OUT'""",
+        [profile, MIN_POST_DATE] + mp,
     ).fetchone()[0]
     unknown_count = conn.execute(
-        """SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND p.post_date >= ?
+        f"""SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
+           WHERE p.profile = ? AND p.post_date >= ? {mc}
              AND (pr.availability_status IS NULL OR pr.availability_status = 'UNKNOWN')""",
-        (profile, MIN_POST_DATE),
+        [profile, MIN_POST_DATE] + mp,
     ).fetchone()[0]
     pending = max(total_posts - total_products, 0)
     pct = round((total_products / total_posts) * 100) if total_posts else 0
 
-    image_cleaned_count, image_ready_total = image_cleaning_progress(conn, profile)
+    image_cleaned_count, image_ready_total = image_cleaning_progress(conn, profile, month_filter)
     image_clean_pct = round((image_cleaned_count / image_ready_total) * 100) if image_ready_total else 0
     ready_to_ship_count = image_cleaned_count  # same set: fully-ready AND image-cleaned
 
@@ -833,7 +871,8 @@ def brand_stats_json(profile):
     if profile not in profiles:
         conn.close()
         abort(404)
-    stats = compute_brand_stats(conn, profile)
+    month_filter = request.args.get("month", "all")
+    stats = compute_brand_stats(conn, profile, month_filter)
     conn.close()
     return stats
 
@@ -845,7 +884,12 @@ def render_brand_page(profile: str):
         conn.close()
         abort(404)
 
-    stats = compute_brand_stats(conn, profile)
+    months = available_months(conn, profile)
+    month_filter = request.args.get("month", "all")
+    if month_filter not in months:
+        month_filter = "all"
+
+    stats = compute_brand_stats(conn, profile, month_filter)
     total_posts = stats["total_posts"]
     total_products = stats["total_products"]
     is_product = stats["is_product"]
@@ -867,7 +911,7 @@ def render_brand_page(profile: str):
     if status_filter not in valid_statuses:
         status_filter = "all"
 
-    all_ids = filtered_product_ids(conn, profile, status_filter)
+    all_ids = filtered_product_ids(conn, profile, status_filter, month_filter)
     visible_count = len(all_ids)
 
     page_size = request.args.get("size", DEFAULT_PAGE_SIZE, type=int)
@@ -891,7 +935,7 @@ def render_brand_page(profile: str):
     else:
         products = []
 
-    back_plain = f"/brand/{profile}?page={page}&size={page_size}&status={status_filter}"
+    back_plain = f"/brand/{profile}?page={page}&size={page_size}&status={status_filter}&month={month_filter}"
     back_url = quote(back_plain, safe="")
 
     cards_html = []
@@ -929,8 +973,8 @@ def render_brand_page(profile: str):
     )
     tabs = TABS_TEMPLATE.format(home_active="", tab_links=tab_links)
 
-    prev_href = f"/brand/{quote(profile)}?page={page-1}&size={page_size}&status={status_filter}"
-    next_href = f"/brand/{quote(profile)}?page={page+1}&size={page_size}&status={status_filter}"
+    prev_href = f"/brand/{quote(profile)}?page={page-1}&size={page_size}&status={status_filter}&month={month_filter}"
+    next_href = f"/brand/{quote(profile)}?page={page+1}&size={page_size}&status={status_filter}&month={month_filter}"
     prev_disabled = "disabled" if page <= 1 else ""
     next_disabled = "disabled" if page >= total_pages else ""
     pagination = (
@@ -942,8 +986,25 @@ def render_brand_page(profile: str):
     )
 
     page_size_links = " &middot; ".join(
-        f'<a class="{"active" if s == page_size else ""}" href="/brand/{quote(profile)}?page=1&size={s}&status={status_filter}">{s}/page</a>'
+        f'<a class="{"active" if s == page_size else ""}" '
+        f'href="/brand/{quote(profile)}?page=1&size={s}&status={status_filter}&month={month_filter}">{s}/page</a>'
         for s in ALLOWED_PAGE_SIZES
+    )
+
+    def _month_label(ym):
+        try:
+            return datetime.strptime(ym, "%Y-%m").strftime("%B %Y")
+        except ValueError:
+            return ym
+
+    month_options_html = '<option value="all">All months</option>\n' + "\n".join(
+        f'<option value="{ym}" {"selected" if ym == month_filter else ""}>{_month_label(ym)}</option>'
+        for ym in months
+    )
+    month_filter_html = (
+        f'<select class="month-filter" onchange="window.location.href=\'/brand/{quote(profile)}'
+        f"?page=1&size={page_size}&status={status_filter}&month='+this.value\">"
+        f'{month_options_html}</select>'
     )
 
     status_labels = [
@@ -957,7 +1018,7 @@ def render_brand_page(profile: str):
     ]
     status_filters_html = "\n".join(
         f'<a class="{"active" if key == status_filter else ""}" '
-        f'href="/brand/{quote(profile)}?page=1&size={page_size}&status={key}">{label}</a>'
+        f'href="/brand/{quote(profile)}?page=1&size={page_size}&status={key}&month={month_filter}">{label}</a>'
         for key, label in status_labels
     )
     status_filters = f'<div class="status-filters">{status_filters_html}</div>'
@@ -989,6 +1050,7 @@ def render_brand_page(profile: str):
         product_cards="\n".join(cards_html) or "<p>No products in this view.</p>",
         pagination=pagination,
         page_size_links=page_size_links,
+        month_filter_html=month_filter_html,
     )
 
 
@@ -1086,19 +1148,21 @@ def _existing_colors_for_profile(conn, profile, limit=80):
 
 
 def _parse_back(back_raw, fallback_profile):
-    """Pull the profile + status filter back out of a stored back-link like
-    /brand/chicstyle.ghana?page=2&size=50&status=review, so Prev/Next on the
-    edit page can walk the exact same filtered list the reviewer was
-    browsing instead of falling back to "all"."""
+    """Pull the profile + status filter + month back out of a stored
+    back-link like /brand/chicstyle.ghana?page=2&size=50&status=review&
+    month=2025-08, so Prev/Next on the edit page can walk the exact same
+    filtered list the reviewer was browsing instead of falling back to
+    "all"."""
     if not back_raw:
-        return fallback_profile, "all"
+        return fallback_profile, "all", "all"
     parsed = urlparse(back_raw)
     qs = parse_qs(parsed.query)
     profile = fallback_profile
     if parsed.path.startswith("/brand/"):
         profile = parsed.path[len("/brand/"):] or fallback_profile
     status = qs.get("status", ["all"])[0]
-    return profile, status
+    month = qs.get("month", ["all"])[0]
+    return profile, status, month
 
 
 def _nav_buttons_html(prev_href, next_href, position_label):
@@ -1134,8 +1198,8 @@ def product_edit(product_id):
     is_ready, missing = readiness_check(conn, product_id)
 
     back_param = request.args.get("back", "")
-    nav_profile, nav_status = _parse_back(back_param, r["profile"])
-    nav_ids = filtered_product_ids(conn, nav_profile, nav_status)
+    nav_profile, nav_status, nav_month = _parse_back(back_param, r["profile"])
+    nav_ids = filtered_product_ids(conn, nav_profile, nav_status, nav_month)
     conn.close()
 
     if product_id in nav_ids:
