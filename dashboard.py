@@ -1207,6 +1207,18 @@ def product_edit(product_id):
         position_label = f"{idx + 1} of {len(nav_ids)} in this view"
         prev_id = nav_ids[idx - 1] if idx > 0 else None
         next_id = nav_ids[idx + 1] if idx < len(nav_ids) - 1 else None
+    elif nav_ids:
+        # The edit just just saved took this product out of the filtered
+        # view it was being reviewed from (e.g. unchecking "needs review"
+        # while on the Needs review tab) -- Prev/Next should still move
+        # through the queue instead of dead-ending, so find where it would
+        # have sat and offer its new neighbors. nav_ids is newest-id-first,
+        # so "next" is the closest remaining id smaller than this one.
+        smaller = [i for i in nav_ids if i < product_id]
+        larger = [i for i in nav_ids if i > product_id]
+        next_id = smaller[0] if smaller else None
+        prev_id = larger[-1] if larger else None
+        position_label = f"resolved -- {len(nav_ids)} left in this view"
     else:
         position_label = ""
         prev_id = next_id = None
