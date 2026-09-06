@@ -687,6 +687,16 @@ def _month_clause(month_filter, column="p.post_date"):
     return "", []
 
 
+def _brand_scope_clause(profile, column="pr.availability_status"):
+    """Per-brand exclusion on top of the universal MIN_POST_DATE/video
+    scope -- currently just kiddies_spacegh's sold-out items, hidden from
+    every view (not just Needs review) at the client's specific request
+    for this brand. Other brands are unaffected."""
+    if profile == "kiddies_spacegh":
+        return f"AND ({column} IS NULL OR {column} != 'SOLD_OUT')"
+    return ""
+
+
 def available_months(conn, profile):
     """Distinct 'YYYY-MM' values present for this profile, newest first --
     populates the month filter dropdown. Scoped to the same MIN_POST_DATE
@@ -786,9 +796,11 @@ def filtered_product_ids(conn, profile, status_filter, month_filter=None):
         return sorted(ready_to_ship_ids(conn, profile, month_filter), reverse=True)
     clause = FILTER_CLAUSES.get(status_filter, "")
     month_clause, month_params = _month_clause(month_filter)
+    brand_scope = _brand_scope_clause(profile)
     rows = conn.execute(
         f"""SELECT pr.id FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND p.post_date >= ? AND p.media_type != 'video' {month_clause} {clause} ORDER BY pr.id DESC""",
+           WHERE p.profile = ? AND p.post_date >= ? AND p.media_type != 'video' {month_clause} {brand_scope} {clause}
+           ORDER BY pr.id DESC""",
         [profile, MIN_POST_DATE] + month_params,
     ).fetchall()
     return [row["id"] for row in rows]
@@ -800,6 +812,7 @@ def compute_brand_stats(conn, profile, month_filter=None):
     the two can never drift out of sync with each other."""
     mc_post, mp_post = _month_clause(month_filter, column="post_date")
     mc, mp = _month_clause(month_filter)
+    bs = _brand_scope_clause(profile)
 
     total_posts = conn.execute(
         f"SELECT COUNT(*) FROM instagram_post WHERE profile = ? AND post_date >= ? AND media_type != 'video' {mc_post}",
@@ -807,11 +820,12 @@ def compute_brand_stats(conn, profile, month_filter=None):
     ).fetchone()[0]
     total_products = conn.execute(
         f"""SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND p.post_date >= ? AND p.media_type != 'video' {mc}""", [profile, MIN_POST_DATE] + mp
+           WHERE p.profile = ? AND p.post_date >= ? AND p.media_type != 'video' {mc} {bs}""",
+        [profile, MIN_POST_DATE] + mp,
     ).fetchone()[0]
     is_product = conn.execute(
         f"""SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND p.post_date >= ? AND p.media_type != 'video' {mc} AND pr.is_product_post = 1""",
+           WHERE p.profile = ? AND p.post_date >= ? AND p.media_type != 'video' {mc} {bs} AND pr.is_product_post = 1""",
         [profile, MIN_POST_DATE] + mp,
     ).fetchone()[0]
     review_required = conn.execute(
@@ -822,7 +836,7 @@ def compute_brand_stats(conn, profile, month_filter=None):
     ).fetchone()[0]
     duplicates = conn.execute(
         f"""SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND p.post_date >= ? AND p.media_type != 'video' {mc} AND pr.duplicate_of IS NOT NULL""",
+           WHERE p.profile = ? AND p.post_date >= ? AND p.media_type != 'video' {mc} {bs} AND pr.duplicate_of IS NOT NULL""",
         [profile, MIN_POST_DATE] + mp,
     ).fetchone()[0]
     fully_ready = len(fully_ready_ids(conn, profile, month_filter))
@@ -833,7 +847,7 @@ def compute_brand_stats(conn, profile, month_filter=None):
     ).fetchone()[0]
     sold_out_count = conn.execute(
         f"""SELECT COUNT(*) FROM product pr JOIN instagram_post p ON p.id = pr.post_id
-           WHERE p.profile = ? AND p.post_date >= ? AND p.media_type != 'video' {mc} AND pr.availability_status = 'SOLD_OUT'""",
+           WHERE p.profile = ? AND p.post_date >= ? AND p.media_type != 'video' {mc} {bs} AND pr.availability_status = 'SOLD_OUT'""",
         [profile, MIN_POST_DATE] + mp,
     ).fetchone()[0]
     pct = round((total_products / total_posts) * 100) if total_posts else 0
@@ -1062,8 +1076,9 @@ def home():
             "SELECT COUNT(*) FROM instagram_post WHERE profile = ? AND post_date >= ? AND media_type != 'video'", (p, MIN_POST_DATE)
         ).fetchone()[0]
         total_products = conn.execute(
-            """SELECT COUNT(*) FROM product pr JOIN instagram_post ip ON ip.id = pr.post_id
-               WHERE ip.profile = ? AND ip.post_date >= ? AND ip.media_type != 'video'""", (p, MIN_POST_DATE)
+            f"""SELECT COUNT(*) FROM product pr JOIN instagram_post ip ON ip.id = pr.post_id
+               WHERE ip.profile = ? AND ip.post_date >= ? AND ip.media_type != 'video' {_brand_scope_clause(p)}""",
+            (p, MIN_POST_DATE),
         ).fetchone()[0]
         cards.append(
             f'<a class="brand-card" href="/brand/{quote(p)}">'
